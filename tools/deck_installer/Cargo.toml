@@ -1,0 +1,12 @@
+[package]
+name = "darkrecomp-deck-installer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+publish = false
+license = "GPL-3.0-or-later"
+
+[profile.release]
+lto = true
+strip = true
+panic = "abort"

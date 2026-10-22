@@ -334,6 +334,8 @@ if(BUILD_TESTING)
     add_test(NAME GeneratorSetupContract COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/test_setup_generator.py")
     set_tests_properties(GeneratorSetupContract PROPERTIES TIMEOUT 60)
     add_test(NAME ReleasePackagingContract COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/test_release.py")
+    add_test(NAME AppImagePackagingContract COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/test_appimage.py")
+    set_tests_properties(AppImagePackagingContract PROPERTIES TIMEOUT 60)
     add_test(NAME ReleaseUpdaterContract COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
         -File "${CMAKE_SOURCE_DIR}/tests/test_update_release.ps1")
     set_tests_properties(ReleaseUpdaterContract PROPERTIES TIMEOUT 120)

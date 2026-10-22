@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shlex
 import shutil
+import stat
 import sys
 import tarfile
 import tempfile
@@ -45,6 +46,8 @@ REQUIRED = ('DarkRecomp.exe', 'DarkRecompPreview.exe', 'DarkRecompSettings.exe',
     'avcodec-darkxma-62.dll', 'avutil-darkxma-60.dll', 'libwinpthread-1.dll',
     'CubeWnd.pc.xcr', 'CubeWnd.pc.ru.xcr', 'CubeWnd.pc.xcr.source.sha256', 'GameContext_Create.pc.xdf')
 CRT = ('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')
+OPTIONAL_RELEASE_FILES = ('COPYING', 'README.md', 'STEAM_DECK.md', 'START_HERE.txt',
+                          'CONTROLS.md', 'RENDERING.md', 'tools/add_steam_shortcut.py')
 MANIFEST = 'LINUX_SETUP.json'
 VERSION = 1
 
@@ -139,9 +142,54 @@ def is_wsl2() -> bool:
     return 'microsoft' in text and ('wsl2' in text or Path('/dev/dxg').exists())
 
 
+def release_resources(source: Path) -> dict[Path, tuple[Path, bool]]:
+    """Retain release instructions and licenses without copying unrelated tools."""
+    result = {}
+
+    def inspect(path: Path, directory: bool = False) -> bool:
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            return False
+        expected = stat.S_ISDIR if directory else stat.S_ISREG
+        if not expected(mode):
+            raise SetupError(f'Release resources must be real files/directories, not links: {path}')
+        return True
+
+    for name in OPTIONAL_RELEASE_FILES:
+        relative = Path(name)
+        parent = source
+        for part in relative.parts[:-1]:
+            parent /= part
+            if not inspect(parent, directory=True):
+                break
+        else:
+            path = source / relative
+            if inspect(path):
+                result[Path('game') / relative] = (path, False)
+
+    def fail_walk(error: OSError) -> None:
+        raise SetupError(f'Cannot read release resources: {error}') from error
+
+    third_party = source / 'ThirdParty'
+    if inspect(third_party, directory=True):
+        for current, directories, files in os.walk(third_party, followlinks=False, onerror=fail_walk):
+            directory = Path(current)
+            for name in directories:
+                if not inspect(directory / name, directory=True):
+                    raise SetupError(f'Release resource directory disappeared: {directory / name}')
+            for name in files:
+                path = directory / name
+                if not inspect(path):
+                    raise SetupError(f'Release resource file disappeared: {path}')
+                result[Path('game') / path.relative_to(source)] = (path, False)
+    return result
+
+
 def source_files(source: Path, game: Path, crt: Path | None, wsl: bool) -> dict[Path, tuple[Path, bool]]:
     """Destination-relative file -> (source, immutable original-game bytes)."""
     result = {Path('game/Launch.sh'): (required_file(source, 'Launch.sh'), False)}
+    result.update(release_resources(source))
     release = source / 'build_native/Release'
     for name in REQUIRED:
         path = required_file(release, name)
