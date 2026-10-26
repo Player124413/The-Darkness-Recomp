@@ -31,9 +31,12 @@ class NativeMenuText(unittest.TestCase):
     def test_dynamic_settings_and_keyboard_status_have_compact_translations(self):
         translations = load_catalog()
         for text in ("ON", "OFF", "ORIGINAL", "BORDERLESS", "WINDOWED", "UNLIMITED", "SYSTEM",
+                     "AUTO", "4:3 STRETCH",
                      "ENGLISH", "GERMAN", "FRENCH", "SPANISH", "ITALIAN", "SAVE FAILED"):
             self.assertIn(text, translations)
             self.assertLessEqual(len(translations[text]), 12, text)
+        self.assertLessEqual(len(translations["DISPLAY ASPECT"]), 20)
+        self.assertLessEqual(len(translations["RES/ASPECT/LANG: RESTART TO APPLY"]), 40)
         for text in ("UNBOUND", "RELEASE", "PRESSKEY", "PRESS..."):
             self.assertIn(text, translations)
             self.assertLessEqual(len(translations[text]), 8, text)

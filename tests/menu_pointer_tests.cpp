@@ -21,6 +21,17 @@ int main() {
         require(!mapMenuPointer(letterbox, 640, 139, 640, 480), "letterbox must not activate menu");
         point = mapMenuPointer(letterbox, 640, 500, 640, 480);
         require(point && point->x == 320 && point->y == 240, "letterbox center");
+        const MenuPointerDisplay stretch{640, 480, 1920, 1080, true};
+        point = mapMenuPointer(stretch, 0, 0, 640, 480);
+        require(point && point->x == 0 && point->y == 0,
+                "stretch presentation did not map its physical top-left edge");
+        point = mapMenuPointer(stretch, 1919, 1079, 640, 480);
+        require(point && point->x == 639 && point->y == 479,
+                "stretch presentation did not map its physical bottom-right edge");
+        point = mapMenuPointer(stretch, 960, 540, 640, 480,
+                               MenuPointerProjection{{2.0 / 640, 0, -1}, {0, -2.0 / 480, 1}, {0, 0, 1}});
+        require(point && point->x == 320 && point->y == 240,
+                "projected pointer did not use the stretch presentation rectangle");
         require(!mapMenuPointer({}, 0, 0, 640, 480), "uninitialized display must be inert");
         require(!mapMenuPointer(wide, 0, 0, 0, 480), "empty original window must be inert");
         const MenuPointerProjection fullPlane{{2.0 / 640, 0, -1}, {0, -2.0 / 480, 1}, {0, 0, 1}};

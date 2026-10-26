@@ -31,7 +31,7 @@ class EnginePreviewD3D11 {
     Ptr<ID3D11RenderTargetView> calibratedTarget_;
     Ptr<ID3D11PixelShader> displayGammaPs_;
     std::shared_ptr<const Native::DisplayGamma> displayGamma_;
-    bool highPrecisionDisplay_=false,calibrationDirty_=true;
+    bool highPrecisionDisplay_=false,calibrationDirty_=true,stretchToFill_=false;
     void updateCalibratedImage();
     Ptr<ID3D11VertexShader> vs_;
     Ptr<ID3D11PixelShader> ps_, videoPs_, colorPs_;
@@ -69,7 +69,7 @@ public:
     // Output dimensions are physical pixels; scale applies to guest world commands.
     EnginePreviewD3D11(ID3D11Device*, ID3D11DeviceContext*, IDXGISwapChain*,
                        uint32_t renderWidth = 0, uint32_t renderHeight = 0, uint32_t scale = 1,
-                       bool highPrecisionDisplay = false);
+                       bool highPrecisionDisplay = false, bool stretchToFill = false);
     // Window-thread-only, after the last part of a frame. Logical guest extents
     // must stay fixed; all old targets remain usable if preparing a resize fails.
     bool resizeRenderTarget(uint32_t width,uint32_t height,uint32_t scale);

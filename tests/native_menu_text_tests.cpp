@@ -39,6 +39,9 @@ int main() {
                   "subtitle translations changed an unrelated PC label");
         }
         initializeNativeMenuText(true, 1);
+        check(nativeMenuText("AUTO") == "\xc0\xc2\xd2\xce" &&
+              nativeMenuText("4:3 STRETCH") == "4:3 \xd0\xc0\xd1\xd2\xdf\xc6\xca\xc0",
+              "aspect values were not translated for the Russian menu");
         check(nativeMenuText("SUBTITLE SIZE") == "\xd0\xc0\xc7\xcc\xc5\xd0 \xd1\xd3\xc1\xd2\xc8\xd2\xd0\xce\xc2",
               "western subtitle translations replaced the Russian revision text");
         initializeNativeMenuText(false, 999);

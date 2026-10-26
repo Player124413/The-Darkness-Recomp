@@ -86,6 +86,8 @@ bool changeVideoSetting(std::string_view action, int direction) noexcept {
     else if (action == "darkrecomp.mode") settings.fullscreen = !settings.fullscreen;
     else if (action == "darkrecomp.resolution")
         settings.renderHeight = step(settings.renderHeight, direction, std::array{360u, 480u, 720u, 1080u, 1440u, 2160u});
+    else if (action == "darkrecomp.aspect")
+        settings.aspectMode = DisplayAspectMode(step(unsigned(settings.aspectMode), direction, std::array{0u, 1u}));
     else if (action == "darkrecomp.fps")
         settings.frameRateLimit = step(settings.frameRateLimit, direction, std::array{0u, 30u, 60u, 90u, 120u, 144u, 165u, 240u, 360u});
     else if (action == "darkrecomp.fov") {
@@ -117,6 +119,8 @@ std::string videoSettingLabel(std::string_view action) {
     else if (action == "darkrecomp.vsync") result = settings.verticalSync ? "On" : "Off";
     else if (action == "darkrecomp.mode") result = settings.fullscreen ? "Borderless" : "Windowed";
     else if (action == "darkrecomp.resolution") result = std::to_string(settings.renderHeight) + "p";
+    else if (action == "darkrecomp.aspect")
+        result = settings.aspectMode == DisplayAspectMode::Stretch4x3 ? "4:3 STRETCH" : "Auto";
     else if (action == "darkrecomp.fps") result = settings.frameRateLimit ? std::to_string(settings.frameRateLimit) : "Unlimited";
     else if (action == "darkrecomp.fov") {
         char fov[32]{};

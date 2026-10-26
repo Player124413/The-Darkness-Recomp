@@ -276,6 +276,7 @@ int wmain(int argc, wchar_t** argv) {
         if (overrideFullscreen) activeGraphics.fullscreen = fullscreen;
         if (overrideRenderHeight) activeGraphics.renderHeight = renderHeight;
         if (overrideVsync) activeGraphics.verticalSync = verticalSync;
+        const bool stretchToFill = activeGraphics.aspectMode == DarkRecomp::Native::DisplayAspectMode::Stretch4x3;
         setGraphicsSettings(activeGraphics);
         initializeVideoSettingsMenu();
         initializeMenuPointer();
@@ -377,13 +378,14 @@ int wmain(int argc, wchar_t** argv) {
         // automatic fullscreen aspect from the monitor it actually occupies.
         if (fullscreen && !windowWidth)
             requestedSize = {uint32_t(actualClient.right), uint32_t(actualClient.bottom)};
-        const auto renderSize = renderSizeForDisplay(requestedSize, renderHeight);
+        const auto renderSize = renderSizeForDisplay(requestedSize, renderHeight, activeGraphics.aspectMode);
         const auto resolutionScale = nativeResolutionScale(renderSize);
         mouse.setRenderHeight(renderSize.height);
         if (!setNativeVideoMode(renderSize.width / resolutionScale, renderSize.height / resolutionScale))
             throw std::runtime_error("Requested render aspect or size is unsupported");
         display.Init(window, uint32_t(actualClient.right), uint32_t(actualClient.bottom));
-        setMenuPointerDisplay(renderSize.width, renderSize.height, uint32_t(actualClient.right), uint32_t(actualClient.bottom));
+        setMenuPointerDisplay(renderSize.width, renderSize.height, uint32_t(actualClient.right),
+                              uint32_t(actualClient.bottom), stretchToFill);
         displayResizePending = false;
         std::printf("[Display] output=%ldx%ld render=%ux%u aspect=%.6f fullscreen=%u scale=%u guest=%ux%u\n",
                     actualClient.right, actualClient.bottom, renderSize.width, renderSize.height,
@@ -421,7 +423,8 @@ int wmain(int argc, wchar_t** argv) {
         std::unique_ptr<DarkRecomp::EnginePreviewD3D11> preview;
         if (enginePreview) {
             preview = std::make_unique<DarkRecomp::EnginePreviewD3D11>(display.GetDevice(), display.GetContext(), display.GetSwapChain(),
-                                                                    renderSize.width, renderSize.height, resolutionScale,true);
+                                                                    renderSize.width, renderSize.height, resolutionScale,true,
+                                                                    stretchToFill);
             preview->setDiagnostics(!rendererTrace.empty() && !manualShadowCapture);
             setPreviewTextureBudget(preview->textureBudget());
             setPreviewFrameBackpressure(true,true);
@@ -608,7 +611,8 @@ int wmain(int argc, wchar_t** argv) {
                                 setGraphicsSettings(updated); requestDisplaySettingsSave();
                                 mouse.setRenderHeight(height);
                                 RECT pointerClient{}; GetClientRect(window, &pointerClient);
-                                setMenuPointerDisplay(width, height, uint32_t(pointerClient.right), uint32_t(pointerClient.bottom));
+                                setMenuPointerDisplay(width, height, uint32_t(pointerClient.right),
+                                                      uint32_t(pointerClient.bottom), stretchToFill);
                                 resolutionStatus.show(L"Render resolution: " + std::to_wstring(width) + L" x " +
                                     std::to_wstring(height) + L" (F6 to switch)");
                                 std::printf("[ResolutionHotkey] applied render=%ux%u scale=%u guest=%ux%u elapsedMs=%.3f\n",
@@ -652,7 +656,8 @@ int wmain(int argc, wchar_t** argv) {
                         if (preview) preview->releaseDisplayTarget();
                         display.Resize(uint32_t(size.right), uint32_t(size.bottom));
                         setMenuPointerDisplay(preview ? preview->renderWidth() : renderSize.width,
-                            preview ? preview->renderHeight() : renderSize.height, uint32_t(size.right), uint32_t(size.bottom));
+                            preview ? preview->renderHeight() : renderSize.height, uint32_t(size.right),
+                            uint32_t(size.bottom), stretchToFill);
                     }
                 }
             } catch (const std::exception& resizeError) {

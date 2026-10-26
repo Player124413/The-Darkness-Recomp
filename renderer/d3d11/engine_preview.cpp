@@ -133,8 +133,10 @@ float4 antialiasingPixel(Presentation f) : SV_TARGET {
 }
 
 EnginePreviewD3D11::EnginePreviewD3D11(ID3D11Device* device, ID3D11DeviceContext* context, IDXGISwapChain* swapChain,
-                                     uint32_t renderWidth, uint32_t renderHeight, uint32_t scale,bool highPrecisionDisplay)
-    : device_(device), context_(context), swapChain_(swapChain),highPrecisionDisplay_(highPrecisionDisplay) {
+                                     uint32_t renderWidth, uint32_t renderHeight, uint32_t scale,
+                                     bool highPrecisionDisplay, bool stretchToFill)
+    : device_(device), context_(context), swapChain_(swapChain),highPrecisionDisplay_(highPrecisionDisplay),
+      stretchToFill_(stretchToFill) {
     if (!device || !context || !swapChain) throw std::invalid_argument("Engine preview requires initialized display");
     if (scale<1 || scale>3) throw std::invalid_argument("World render scale must be between one and three");
     Ptr<ID3D11Texture2D> back;
@@ -423,7 +425,7 @@ void EnginePreviewD3D11::render(const std::vector<SimpleMesh>& meshes,Native::Pr
         for (auto index : mesh.indices) if (index >= mesh.vertices.size()) throw std::invalid_argument("Invalid preview index");
         if (simpleStateDirty) { restoreSimpleState(); simpleStateDirty = false; }
         if (isFullscreenVideo(mesh)) {
-            const auto fit = fitDisplay(mesh.video->width, mesh.video->height, width_, height_);
+            const auto fit = presentationRect(mesh.video->width, mesh.video->height, width_, height_, stretchToFill_);
             const D3D11_VIEWPORT viewport{fit.x, fit.y, fit.width, fit.height, 0, 1};
             context_->RSSetViewports(1, &viewport);
             simpleStateDirty = true;
@@ -605,7 +607,7 @@ void EnginePreviewD3D11::copyToDisplay() {
     context_->OMSetRenderTargets(1, &target, nullptr);
     context_->OMSetDepthStencilState(depth_.Get(), 0);
     context_->RSSetState(raster_.Get());
-    const auto fit = fitDisplay(width_, height_, desc.Width, desc.Height);
+    const auto fit = presentationRect(width_, height_, desc.Width, desc.Height, stretchToFill_);
     const D3D11_VIEWPORT viewport{fit.x, fit.y, fit.width, fit.height, 0, 1};
     context_->RSSetViewports(1, &viewport);
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);

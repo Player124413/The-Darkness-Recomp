@@ -1,5 +1,6 @@
 #include "app/windows/display_settings.h"
 #include "runtime/native/fov_settings.h"
+#include "runtime/native/display_mode.h"
 #include "app/windows/display_options.h"
 #include <cmath>
 #include <cstdio>
@@ -9,6 +10,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 using namespace DarkRecomp;
 using namespace DarkRecomp::Native;
@@ -20,6 +22,11 @@ static std::string fileBytes(const std::filesystem::path& path) {
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
 int main() {
+    struct RestoreNativeVideoMode {
+        NativeVideoMode previous = nativeVideoMode();
+        ~RestoreNativeVideoMode() { (void)setNativeVideoMode(previous.width, previous.height); }
+    };
+    [[maybe_unused]] RestoreNativeVideoMode restoreNativeVideoMode;
     const auto path = std::filesystem::temp_directory_path() /
         (L"DarkRecomp-display-test-" + std::to_wstring(GetCurrentProcessId()) + L".ini");
     struct Cleanup { std::filesystem::path path; bool owned = false; ~Cleanup() { if (owned) { std::error_code ec; std::filesystem::remove(path, ec); } } } cleanup{path};
@@ -28,6 +35,8 @@ int main() {
         cleanup.owned = true;
         check(fieldOfViewSetting() == 0 && loadFieldOfView(path) == 0, "Original default");
         check(loadGraphicsSettings(path) == GraphicsSettings{}, "graphics defaults on missing file");
+        check(GraphicsSettings{}.aspectMode == DisplayAspectMode::Auto,
+              "new installs must preserve automatic display aspect");
         // Unsupported saved heights recover independently. Higher resolutions
         // use native GPU scaling within the original guest allocation limits.
         check(saveDisplaySettings(path, 114, {120, 720, true, true, false}), "seed recovery preferences");
@@ -63,6 +72,46 @@ int main() {
                       "native scaling exceeded the guest allocation limits");
             }
         }
+        for (const NativeDisplaySize output : {NativeDisplaySize{1920,1080}, {3440,1440}, {3840,2160}, {5120,1440}}) {
+            for (uint32_t height = 180; height <= 2160; ++height) {
+                const auto render = renderSizeForDisplay(output, height, DisplayAspectMode::Stretch4x3);
+                const auto scale = nativeResolutionScale(render);
+                check(render.width * 3 == render.height * 4,
+                      "4:3 stretch render dimensions lost their exact aspect");
+                check(scale >= 1 && scale <= 3 && render.width % (4 * scale) == 0 &&
+                      render.height % (4 * scale) == 0 && render.width / scale <= 2560 &&
+                      render.height / scale <= 720,
+                      "4:3 stretch dimensions violate guest viewport alignment or allocation limits");
+            }
+        }
+        const auto untouchedVideoMode = nativeVideoMode();
+        check(!setNativeVideoMode(240, 180) &&
+              nativeVideoMode().width == untouchedVideoMode.width &&
+              nativeVideoMode().height == untouchedVideoMode.height,
+              "native video-mode gate accepted or published a too-narrow guest mode");
+        for (const uint32_t requestedHeight : {180u, 239u}) {
+            const auto render = renderSizeForDisplay({1920,1080}, requestedHeight,
+                                                     DisplayAspectMode::Stretch4x3);
+            const auto scale = nativeResolutionScale(render);
+            const uint32_t guestWidth = render.width / scale;
+            const uint32_t guestHeight = render.height / scale;
+            check(guestWidth == 320 && guestHeight == 240,
+                  "sub-240p 4:3 request did not select the smallest supported guest mode");
+            check(setNativeVideoMode(guestWidth, guestHeight),
+                  "4:3 helper returned a mode rejected by the native video-mode gate");
+            const auto applied = nativeVideoMode();
+            check(applied.width == guestWidth && applied.height == guestHeight,
+                  "accepted low-resolution 4:3 mode was not published exactly");
+        }
+        for (const auto [height, width] : {std::pair{360u,480u}, {480u,640u}, {720u,960u},
+                                           {1080u,1440u}, {1440u,1920u}, {2160u,2880u}}) {
+            const auto render = renderSizeForDisplay({3440,1440}, height, DisplayAspectMode::Stretch4x3);
+            check(render.width == width && render.height == height,
+                  "standard 4:3 resolution changed unexpectedly");
+        }
+        const auto rounded4x3 = renderSizeForDisplay({1920,1080}, 1475, DisplayAspectMode::Stretch4x3);
+        check(rounded4x3.width == 1920 && rounded4x3.height == 1440,
+              "4:3 sizing did not choose the largest aligned mode below a scale boundary");
         for (const auto height : {1080u,1440u,2160u}) {
             auto high = GraphicsSettings{}; high.renderHeight = height;
             check(saveDisplaySettings(path,114,high) && loadGraphicsSettings(path)==high,
@@ -72,6 +121,32 @@ int main() {
         check(saveDisplaySettings(path, 93.125f, custom), "save custom graphics values");
         check(loadGraphicsSettings(path) == custom && loadFieldOfView(path) == 93.125f,
               "complete graphics round trip including bloom, motion blur and antialiasing");
+        for (const auto mode : {DisplayAspectMode::Auto, DisplayAspectMode::Stretch4x3}) {
+            auto selected = custom; selected.aspectMode = mode;
+            check(setGraphicsSettings(selected) && graphicsSettings() == selected &&
+                  saveDisplaySettings(path, 93.125f, selected) && loadGraphicsSettings(path) == selected,
+                  "display aspect did not round-trip through runtime packing and settings persistence");
+            wchar_t savedMode[16]{};
+            GetPrivateProfileStringW(L"Display", L"AspectMode", L"missing", savedMode, 16, path.c_str());
+            check(std::wstring_view(savedMode) == std::to_wstring(unsigned(mode)),
+                  "display aspect mode did not save its stable numeric value");
+        }
+        auto autoAspect = custom; autoAspect.aspectMode = DisplayAspectMode::Auto;
+        check(WritePrivateProfileStringW(L"Display", L"AspectMode", nullptr, path.c_str()) &&
+              loadGraphicsSettings(path) == autoAspect,
+              "legacy settings must default aspect to automatic");
+        for (const auto bad : {L"-1", L"2", L"Stretch4x3", L"42949672960"}) {
+            check(WritePrivateProfileStringW(L"Display", L"AspectMode", bad, path.c_str()),
+                  "seed invalid aspect setting");
+            check(loadGraphicsSettings(path) == autoAspect,
+                  "invalid aspect setting did not recover independently to Auto");
+        }
+        check(saveDisplaySettings(path, 93.125f, custom) && setGraphicsSettings(custom),
+              "restore settings after aspect tests");
+        auto badAspect = custom; badAspect.aspectMode = DisplayAspectMode(2);
+        check(!validGraphicsSettings(badAspect) && !setGraphicsSettings(badAspect) && graphicsSettings() == custom &&
+              !saveDisplaySettings(path, 90, badAspect) && loadGraphicsSettings(path) == custom,
+              "invalid aspect mode partially applied settings");
         check(GraphicsSettings{}.antialiasing == AntialiasingMode::Off, "antialiasing must default to Off");
         for (const auto mode : {AntialiasingMode::Off, AntialiasingMode::FXAA, AntialiasingMode::SMAA,
                                AntialiasingMode::MSAA2x, AntialiasingMode::MSAA4x, AntialiasingMode::MSAA8x}) {

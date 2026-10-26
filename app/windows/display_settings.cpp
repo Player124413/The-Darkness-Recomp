@@ -83,7 +83,9 @@ GraphicsSettings loadGraphicsSettings(const std::filesystem::path& path) noexcep
             readUnsigned(path, L"BrightnessPercent", defaults.brightnessPercent, 50, 200),
             validAnisotropyLevels(anisotropy) ? anisotropy : defaults.anisotropyLevels,
             readUnsigned(path, L"SubtitleScalePercent", defaults.subtitleScalePercent,
-                         kMinimumSubtitleScalePercent, kMaximumSubtitleScalePercent)};
+                         kMinimumSubtitleScalePercent, kMaximumSubtitleScalePercent),
+            DisplayAspectMode(readUnsigned(path, L"AspectMode", unsigned(defaults.aspectMode),
+                                           0, unsigned(DisplayAspectMode::Stretch4x3)))};
 }
 
 namespace {
@@ -113,6 +115,7 @@ bool saveSettings(const std::filesystem::path& path, float fov, const GraphicsSe
             !writeUnsigned(staging, L"BrightnessPercent", settings.brightnessPercent) ||
             !writeUnsigned(staging, L"AnisotropyLevels", settings.anisotropyLevels) ||
             !writeUnsigned(staging, L"SubtitleScalePercent", settings.subtitleScalePercent) ||
+            !writeUnsigned(staging, L"AspectMode", unsigned(settings.aspectMode)) ||
             (language && !saveGameLanguage(staging, *language))) return false;
         WritePrivateProfileStringW(nullptr, nullptr, nullptr, temporary);
         return MoveFileExW(temporary, path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;

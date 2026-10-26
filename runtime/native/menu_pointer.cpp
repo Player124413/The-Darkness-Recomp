@@ -254,9 +254,9 @@ uint32_t dispatchMenuPointer(PPCContext& ctx, uint8_t* base, uint32_t root,
 }
 void initializeMenuPointer() noexcept {}
 void setMenuPointerDisplay(uint32_t imageWidth, uint32_t imageHeight,
-                           uint32_t outputWidth, uint32_t outputHeight) noexcept {
+                           uint32_t outputWidth, uint32_t outputHeight, bool stretchToFill) noexcept {
     std::lock_guard lock(displayMutex);
-    pointerDisplay = {imageWidth, imageHeight, outputWidth, outputHeight};
+    pointerDisplay = {imageWidth, imageHeight, outputWidth, outputHeight, stretchToFill};
 }
 bool guestMenuPointerActive() noexcept {
     if (modalDepth.load(std::memory_order_acquire)) return true;
