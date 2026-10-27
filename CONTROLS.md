@@ -246,3 +246,60 @@ Gameplay prompts use their action bindings, so portal choices show R without
 Esc. Keyboard and mouse keycaps use 64px artwork and appear 25% larger when
 the screen layout has room. The artwork is embedded in the
 game; no separate icon download is needed.
+
+## Diagnostic graceful stop
+
+For automated local tests, pass `--test-quit-file <new-file-path>`. The file
+must not exist when the process starts. To end the run, create it containing
+exactly `quit` followed by LF or CRLF. After two matching background reads,
+the display loop requests the normal window shutdown path.
+
+The quit file has its own worker and works without `--test-input`, including
+when that script has an invalid command, reaches its 64-line limit, or has a
+blocked file read. Incomplete or extra bytes do not request shutdown. This
+opt-in signal is checked by the display loop after startup; `--timeout-ms`
+retains its separate diagnostic process-termination behavior.
+
+## Texture pack authoring (experimental)
+
+The optional world texture-pack loader can export original textures and load
+edited DDS files. Export and one opaque 2x wall replacement have been verified
+in-game on Windows. Other materials and whole-game coverage remain experimental.
+This path is independent of the original game files.
+
+Run with `--dump-textures <new-directory>` to export eligible owned 2D surface
+textures. The directory must be new. Export is bounded to 256 files and 128 MiB
+per run; existing files are never overwritten. Each filename is a SHA256 content
+key for the original decoded pixels, dimensions, codec and authored mip levels.
+Unavailable base levels, render targets, video, fixed/post-process UI, prompts,
+subtitles and cubes are not replacement candidates. Some 3D intro and menu
+surfaces share eligible surface programs and can appear in the export.
+
+Edit a dumped texture in a DDS-capable editor and place the edited file in a
+separate pack directory, keeping its original 64-character filename. Launch
+with `--texture-pack <directory>`. Replacements must keep the aspect ratio and
+use the original dimensions or a uniform 2x/4x enlargement, at most 4096 per
+axis. The supported format is one tightly packed RGBA8/BGRA8 UNORM DDS image
+with every mip through 1x1. Compression, sRGB, arrays, cubes, volumes and
+premultiplied alpha are not supported. The [DDS tool](tools/texture_mods/README.md)
+validates this subset or packs raw RGBA bytes with a simple box mip chain.
+
+Pack files are cached for the run; restart after editing them. A missing,
+unsupported or over-budget replacement keeps the original texture. The cache
+uses at most one quarter of the ordinary texture-cache budget, capped at
+128 MiB, plus resources still retained by current draw bindings. File reads,
+content hashing and immutable GPU creation run on the owned worker. With both
+options omitted, no texture-pack worker or file access is enabled.
+
+## Video replacement packs (experimental)
+
+The [video pack tool](tools/video_mods/README.md) imports an authored WMV3 or
+Theora file for an original video pathname. Set `DARK_VIDEO_MOD_DIR` to the new
+pack directory before launching a build with the loader. Omit or clear that
+variable to select original videos. No original game file is overwritten.
+
+The importer checks codec, frame rate, duration and audio stream layout. The
+original decoder, playback clock and screen geometry remain in use. External
+XWC audio is separate. Payloads are pinned against writes/deletion for the run;
+restart with a newly built pack after editing. Current bounds and qualification
+limits are in the tool's README.

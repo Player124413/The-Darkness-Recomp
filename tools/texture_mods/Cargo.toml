@@ -1,0 +1,13 @@
+[package]
+name = "darkrecomp-texture-tool"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

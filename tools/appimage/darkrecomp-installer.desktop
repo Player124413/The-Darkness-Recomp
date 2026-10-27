@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=The Darkness Recomp Installer
+Comment=Install The Darkness Recomp on Steam Deck using your own Xbox 360 game files
+Exec=darkrecomp-deck-installer
+Icon=darkrecomp-installer
+Terminal=false
+Categories=Game;
+Keywords=Darkness;Steam;Deck;Installer;

@@ -37,6 +37,9 @@ class SceneWorkPool {
 public:
     explicit SceneWorkPool(unsigned workers) noexcept;
     ~SceneWorkPool();
+    // Terminal startup cancellation only, before any guest can submit work.
+    // Idempotent stop/join; the immortal shared pool is never reset/restarted.
+    void stopForStartupCancellation() noexcept;
     SceneWorkPool(const SceneWorkPool&)=delete;
     SceneWorkPool& operator=(const SceneWorkPool&)=delete;
     unsigned workers() const noexcept {return unsigned(workers_.size());}

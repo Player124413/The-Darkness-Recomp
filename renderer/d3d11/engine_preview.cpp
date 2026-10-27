@@ -2,6 +2,7 @@
 #include "stall_profile_d3d11.h"
 #include "renderer/engine/engine_performance.h"
 #include "runtime/native/graphics_settings.h"
+#include "runtime/native/startup_trace.h"
 #include "renderer/engine/prompt_icons.h"
 #include "renderer/engine/prompt_layout.h"
 #include "renderer/engine/subtitle_font.h"
@@ -134,11 +135,13 @@ float4 antialiasingPixel(Presentation f) : SV_TARGET {
 
 EnginePreviewD3D11::EnginePreviewD3D11(ID3D11Device* device, ID3D11DeviceContext* context, IDXGISwapChain* swapChain,
                                      uint32_t renderWidth, uint32_t renderHeight, uint32_t scale,
-                                     bool highPrecisionDisplay, bool stretchToFill)
+                                     bool highPrecisionDisplay, bool stretchToFill,
+                                     const std::function<void()>& startup)
     : device_(device), context_(context), swapChain_(swapChain),highPrecisionDisplay_(highPrecisionDisplay),
       stretchToFill_(stretchToFill) {
     if (!device || !context || !swapChain) throw std::invalid_argument("Engine preview requires initialized display");
     if (scale<1 || scale>3) throw std::invalid_argument("World render scale must be between one and three");
+    if (startup) startup();
     Ptr<ID3D11Texture2D> back;
     check(swapChain_->GetBuffer(0, IID_PPV_ARGS(&back)), "GetBuffer");
     D3D11_TEXTURE2D_DESC desc{}; back->GetDesc(&desc);
@@ -151,6 +154,7 @@ EnginePreviewD3D11::EnginePreviewD3D11(ID3D11Device* device, ID3D11DeviceContext
     check(device_->CreateShaderResourceView(target_.Get(), nullptr, &presentationSource_), "create presentation source");
     desc.BindFlags = 0; desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     check(device_->CreateTexture2D(&desc, nullptr, &staging_), "create readback");
+    if (startup) startup();
     Ptr<ID3DBlob> vertex, pixel, errors;
     HRESULT hr = D3DCompile(shader, sizeof(shader)-1, "engine_text_preview", nullptr, nullptr,
                            "vertexMain", "vs_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &vertex, &errors);
@@ -160,14 +164,17 @@ EnginePreviewD3D11::EnginePreviewD3D11(ID3D11Device* device, ID3D11DeviceContext
                     "pixelMain", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &pixel, &errors), "compile pixel shader");
     check(device_->CreateVertexShader(vertex->GetBufferPointer(), vertex->GetBufferSize(), nullptr, &vs_), "create vertex shader");
     check(device_->CreatePixelShader(pixel->GetBufferPointer(), pixel->GetBufferSize(), nullptr, &ps_), "create pixel shader");
+    if (startup) startup();
     pixel.Reset(); errors.Reset();
     check(D3DCompile(shader, sizeof(shader)-1, "engine_video_preview", nullptr, nullptr,
                     "videoMain", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &pixel, &errors), "compile video shader");
     check(device_->CreatePixelShader(pixel->GetBufferPointer(), pixel->GetBufferSize(), nullptr, &videoPs_), "create video shader");
+    if (startup) startup();
     pixel.Reset(); errors.Reset();
     check(D3DCompile(shader, sizeof(shader)-1, "engine_color_preview", nullptr, nullptr,
                     "colorMain", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &pixel, &errors), "compile color shader");
     check(device_->CreatePixelShader(pixel->GetBufferPointer(), pixel->GetBufferSize(), nullptr, &colorPs_), "create color shader");
+    if (startup) startup();
     D3D11_INPUT_ELEMENT_DESC elements[] = {
         {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},
         {"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,0,12,D3D11_INPUT_PER_VERTEX_DATA,0},
@@ -223,21 +230,34 @@ EnginePreviewD3D11::EnginePreviewD3D11(ID3D11Device* device, ID3D11DeviceContext
                     "presentationPixel", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &pixel, nullptr), "compile presentation pixel");
     check(device_->CreateVertexShader(vertex->GetBufferPointer(), vertex->GetBufferSize(), nullptr, &presentationVs_), "create presentation vertex");
     check(device_->CreatePixelShader(pixel->GetBufferPointer(), pixel->GetBufferSize(), nullptr, &presentationPs_), "create presentation pixel");
+    if (startup) startup();
     pixel.Reset();errors.Reset();
     check(D3DCompile(shader,sizeof(shader)-1,"display_gamma",nullptr,nullptr,
                     "displayGammaPixel","ps_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&pixel,&errors),"compile display gamma shader");
     check(device_->CreatePixelShader(pixel->GetBufferPointer(),pixel->GetBufferSize(),nullptr,&displayGammaPs_),"create display gamma shader");
+    if (startup) startup();
     pixel.Reset(); errors.Reset();
     hr = D3DCompile(shader, sizeof(shader)-1, "presentation", nullptr, nullptr,
                     "antialiasingPixel", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0, &pixel, &errors);
     if (FAILED(hr) && errors) std::fprintf(stderr, "%s\n", static_cast<const char*>(errors->GetBufferPointer()));
     check(hr, "compile FXAA pixel shader");
     check(device_->CreatePixelShader(pixel->GetBufferPointer(), pixel->GetBufferSize(), nullptr, &antialiasingPs_), "create FXAA pixel shader");
-    world_=std::make_unique<WorldRendererD3D11>(device,context,scale);
+    if (startup) startup();
+    Native::StartupTrace::mark("world-renderer.begin");
+    world_=std::make_unique<WorldRendererD3D11>(device,context,scale,startup);
+    Native::StartupTrace::mark("world-renderer.end");
     world_->setSubtitleRenderHeight(height_);
+    Native::StartupTrace::mark("engine-preview-initial-render.begin");
+    if (startup) startup();
     render({});
+    if (startup) startup();
+    Native::StartupTrace::mark("engine-preview-initial-render.end");
 }
 
+void EnginePreviewD3D11::configureTextureMods(const TextureMods::Config& config) {
+    if(frameOpen_)throw std::logic_error("Texture packs require a completed frame boundary");
+    world_->configureTextureMods(config);
+}
 bool EnginePreviewD3D11::resizeRenderTarget(uint32_t width,uint32_t height,uint32_t scale) {
     Native::StallProfiler::Scope stallRender(Native::StallProfiler::Section::Rendering, "EnginePreviewD3D11::resizeRenderTarget");
     if(frameOpen_)throw std::logic_error("Cannot resize an unfinished preview frame");

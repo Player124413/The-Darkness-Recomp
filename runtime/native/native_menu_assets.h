@@ -12,5 +12,6 @@ struct NativeMenuAssets {
 // source used to generate the bundled PC menu, or preparation fails.
 NativeMenuAssets prepareNativeMenuAssets(const std::filesystem::path& gameDirectory,
                                         const std::filesystem::path& bundledAssetsDirectory,
-                                        bool russianMenu = false) noexcept;
+                                        bool russianMenu = false,
+                                        const std::filesystem::path& cacheDirectory = {}) noexcept;
 }

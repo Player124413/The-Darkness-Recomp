@@ -101,6 +101,16 @@ public:
         return bytes;
     }
 
+    // A separate reader can request a normal close independently of script
+    // parsing, its command limit, or a blocked script-file read. Only an exact
+    // complete line qualifies; the existing two-equal-read publication rule
+    // prevents a partial/truncated write from requesting shutdown.
+    static std::optional<std::string> readQuitFile(const std::filesystem::path& path, HANDLE stop) {
+        const auto bytes = readFile(path, stop);
+        if (bytes && (*bytes == "quit\n" || *bytes == "quit\r\n")) return "quit\n";
+        return {};
+    }
+
     explicit NativeTestInputFileReader(const std::filesystem::path& path, Read read = readFile,
                                       DWORD pollMs = 250) {
         if (path.empty()) return;

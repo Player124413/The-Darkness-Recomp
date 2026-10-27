@@ -162,6 +162,7 @@ static void nearByte(uint32_t pixel, unsigned channel, int expected) {
 #include "preview_antialiasing_tests.h"
 #include "preview_clear_state_tests.h"
 #include "preview_video_upload_tests.h"
+#include "video_observer_tests.h"
 #include "world_video_capture_tests.h"
 #include "world_source_recovery_tests.h"
 #include "world_decal_capture_tests.h"
@@ -472,6 +473,7 @@ static void testPreviewBridge(Memory& memory, PPCContext& threadContext, EngineP
         require(!takePreviewFrame(repeated),"Completed frame was delivered twice");
         return frame;
     };
+    testVideoObserver(memory, renderer, attributes, indices, finish);
     // Engine preview alone cannot measure visibility before world capture.
     previewBeginFlare(0);previewEndFlare();
     require(finish().empty() && !previewReadFlare(0,unavailableFlare) && unavailableFlare==73,
@@ -1518,7 +1520,11 @@ int main(int argc, char** argv) {
         // The original packed decoder calls memcpy, whose tail loop reads
         // executable data. Use the hash-verified image and normal stack/TLS
         // setup instead of invoking AOT against a zero-filled address space.
-        owner.load(argv[1]);
+        const auto userData = std::filesystem::temp_directory_path() /
+            (L"DarkEngineMesh-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+        require(std::filesystem::create_directory(userData), "Fresh engine mesh test user-data directory required");
+        std::printf("[EngineMeshTest] Isolated user data: %ls\n", userData.c_str());
+        owner.load(argv[1], userData);
         PPCContext ctx{};
         owner.initThread(ctx);
         testTexture1555(owner);

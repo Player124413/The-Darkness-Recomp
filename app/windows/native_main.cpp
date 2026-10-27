@@ -1,10 +1,12 @@
 #include <intrin.h>
 #include "runtime/native/runtime.h"
 #include "runtime/native/stall_profiler.h"
+#include "runtime/native/startup_trace.h"
 #include "runtime/native/audio_driver.h"
 #include "runtime/native/input.h"
 #include "native_mouse.h"
 #include "native_shutdown.h"
+#include "startup_message_pump.h"
 #include "native_launch_paths.h"
 #include "resource.h"
 #include "developer_tools_window.h"
@@ -21,6 +23,8 @@
 #include "runtime/native/language_settings.h"
 #include "runtime/native/video_settings_menu.h"
 #include "runtime/native/menu_pointer.h"
+#include "runtime/native/storage.h"
+#include "renderer/d3d11/shader_bytecode_cache.h"
 #include "runtime/native/developer_tools.h"
 #include "test_input_parser.h"
 #include "frame_metrics.h"
@@ -80,6 +84,8 @@ static bool takeProfiledNativeMessage(MSG& message) noexcept {
     return takeNativeMessage(message);
 }
 static LRESULT CALLBACK NativeWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    LRESULT startupResult = 0;
+    if (handleNativeStartupWindowMessage(window, message, wParam, lParam, startupResult)) return startupResult;
     StallProfiler::Scope callback(StallProfiler::Section::Other, "NativeWindowProc",
         0, 0, message, "win32-message");
     {
@@ -134,6 +140,7 @@ int wmain(int argc, wchar_t** argv) {
         setvbuf(stderr, nullptr, _IOFBF, 65536);
     }
     SetUnhandledExceptionFilter(DarkFlushLogsOnFatalException);
+    StartupTrace::mark("native-main.enter");
     StallProfiler::initializeFromEnvironment();
     struct StallProfilerLifetime {
         ~StallProfilerLifetime() { StallProfiler::shutdown(); }
@@ -145,7 +152,7 @@ int wmain(int argc, wchar_t** argv) {
         return 1;
     }
 #endif
-    std::filesystem::path gameDir;
+    std::filesystem::path gameDir, userDataDirectory;
     bool overrideGameDirectory = false;
     uint32_t timeout = 0;
     unsigned targetFps = 60;
@@ -157,7 +164,7 @@ int wmain(int argc, wchar_t** argv) {
     bool sampleEngine=false,sampleWorkers=false;
     unsigned sceneWorkers=0;
     bool traceFrameHitches=false;
-    std::filesystem::path previewFrame,testInputPath;
+    std::filesystem::path previewFrame,testInputPath,testQuitPath,texturePackPath,textureDumpPath;
     bool testStart=false,testSkipIntros=false;
     bool fullscreen = false;
     uint32_t windowWidth = 0, windowHeight = 0, renderHeight = 720;
@@ -174,6 +181,11 @@ int wmain(int argc, wchar_t** argv) {
         if (arg == L"--game-dir" && i + 1 < argc) {
             gameDir = argv[++i];
             overrideGameDirectory = true;
+        }
+        else if (arg == L"--user-data-dir") {
+            if (i + 1 >= argc) { fputs("--user-data-dir requires a directory.\n", stderr); return 1; }
+            try { userDataDirectory = userDataDirectoryArgument(argv[++i]); }
+            catch (const std::exception& error) { std::fprintf(stderr, "%s\n", error.what()); return 1; }
         }
         else if (arg == L"--timeout-ms" && i + 1 < argc) timeout = wcstoul(argv[++i], nullptr, 10);
         else if (arg == L"--fps" && i + 1 < argc) {
@@ -200,6 +212,12 @@ int wmain(int argc, wchar_t** argv) {
             if(rendererTrace.empty()) {fputs("Shadow capture requires a new directory.\n",stderr);return 1;}
         }
         else if (arg == L"--test-input" && i + 1 < argc) testInputPath=argv[++i];
+        else if (arg == L"--test-quit-file" && i + 1 < argc) testQuitPath=argv[++i];
+        else if (arg == L"--texture-pack" || arg == L"--dump-textures") {
+            if(i+1>=argc || !*argv[i+1]) {fputs("Texture pack/dump requires a directory.\n",stderr);return 1;}
+            if(arg==L"--texture-pack")texturePackPath=argv[++i];
+            else textureDumpPath=argv[++i];
+        }
         else if (arg == L"--test-start") testStart=true;
         else if (arg == L"--test-skip-intros") testSkipIntros=true;
         else if (arg == L"--engine-preview") enginePreview = true;
@@ -240,10 +258,13 @@ int wmain(int argc, wchar_t** argv) {
         }
         else if (arg == L"--preview-frame" && i + 1 < argc) previewFrame = argv[++i];
         else {
-            fputs("Usage: DarkRecomp [--game-dir <directory>] [--timeout-ms N (default 0, no deadline)] [--renderer-smoke] [--trace-renderer <new directory>] [--engine-preview | --no-engine-preview] [--mute] [--fps 60 (default; 0 uncapped)] [--profile-engine] [--sample-engine] [--mouse-sensitivity 1.0] [--language auto|en|de|fr|es|it] [--preview-frame <new BMP path>] [--test-input <file>] [--test-start] [--test-skip-intros]\n", stderr);
+            fputs("Usage: DarkRecomp [--game-dir <directory>] [--timeout-ms N (default 0, no deadline)] [--renderer-smoke] [--trace-renderer <new directory>] [--engine-preview | --no-engine-preview] [--mute] [--fps 60 (default; 0 uncapped)] [--profile-engine] [--sample-engine] [--mouse-sensitivity 1.0] [--language auto|en|de|fr|es|it] [--preview-frame <new BMP path>] [--test-input <file>] [--test-quit-file <new file>] [--test-start] [--test-skip-intros]\n", stderr);
+            fputs("  --user-data-dir <directory> isolates settings, saves and application caches; omitted preserves installed paths.\n", stderr);
             fputs("  Starts with gameplay rendering and sound. Without --game-dir, finds Darkness beside the installed EXE or its parent folders.\n", stderr);
             fputs("  --test-input file lines (max 64, own-process diagnostics only): numeric '<key> [<holdMs 1..10000>]' (bare menu keys hold 250ms, I/J/K/L hold 2000ms; gameplay keys WASD/E/R/F/X/Z/C/Q/G/1-4/Tab/Back/Shift/Ctrl plus arrows/Space/Return/Esc/IJKL; 116=F5 panel,117=gated F6); 'mouse <dx> <dy>' (+/-10000, held 2000ms); 'capture' game screenshots; '0' inspects; 'dev open|close|status|defaults', 'dev mission <ID>', 'dev speed <preset>', 'dev invincible|noclip|resolution on|off', 'dev darkness unlock|max', 'dev capture <absolute BMP path>'; an invalid line blocks later commands until that line is fixed.\n", stderr);
             fputs("  Complete each --test-input command with a newline; an owned worker reads at 250ms intervals and publishes after two matching reads. Dispatch checks every 250ms (normally about 750ms total latency). Maximum file size: 256KiB.\n", stderr);
+            fputs("  --test-quit-file: the path must not exist at startup. Create it with exactly quit followed by LF or CRLF to request normal window shutdown after two matching background reads. This works independently of --test-input.\n", stderr);
+            fputs("  --texture-pack <directory> opts into content-keyed RGBA8 DDS world texture replacements. --dump-textures <new directory> exports eligible originals for authoring (bounded to256 files/128MiB). Omitted leaves original textures.\n",stderr);
             fputs("  Display: --fullscreen or --windowed; --width W --height H selects window/aspect size; --render-height H controls internal resolution (180..2160, default 720). Alt+Enter toggles borderless fullscreen; enable the F6 resolution shortcut in the F5 developer panel to switch live 720p/1440p when started with a 720-high guest mode (disabled by default).\n", stderr);
             fputs("  Options > Video Settings contains native PC graphics controls. Saved settings apply unless explicitly overridden. --vsync / --no-vsync overrides vertical sync; --fov 0 (Original) or 60..120 overrides horizontal FOV at 16:9 for this run.\n", stderr);
             fputs("  --trace-frame-hitches records bounded slow-frame stage timings without enabling per-draw profiling or instruction sampling.\n", stderr);
@@ -258,6 +279,9 @@ int wmain(int argc, wchar_t** argv) {
         fputs("Specify both --width (320..16384) and --height (180..16384); render height must be 180..2160.\n", stderr);
         return 1;
     }
+    if((rendererSmoke || !enginePreview) && (!texturePackPath.empty() || !textureDumpPath.empty())) {
+        fputs("Texture packs/dumps require the gameplay renderer.\n",stderr); return 1;
+    }
     puts("DarkRecomp native Windows AOT runtime - development build, gameplay incomplete");
     try {
         if (!overrideGameDirectory) {
@@ -267,7 +291,15 @@ int wmain(int argc, wchar_t** argv) {
                 throw std::runtime_error("Cannot locate DarkRecomp.exe; specify --game-dir <directory>.");
             gameDir = DarkRecomp::findInstalledGameDirectory(executable);
         }
-        const auto settingsPath = std::filesystem::absolute(gameDir).parent_path() / L"DarkRecomp.settings.ini";
+        const auto dataPaths = resolveUserDataPaths(std::filesystem::absolute(gameDir), userDataDirectory);
+        if (dataPaths.isolated) {
+            prepareUserDataDirectory(dataPaths);
+            Storage::SetSaveRootOverride(dataPaths.saves);
+            DarkRecomp::ShaderBytecodeCache::setDefaultDirectoryOverride(dataPaths.shaderCache);
+            std::printf("[UserData] root=%ls settings=%ls saves=%ls cache=%ls\n", dataPaths.root.c_str(),
+                dataPaths.settings.c_str(), dataPaths.saves.c_str(), dataPaths.guestCache.c_str());
+        }
+        const auto& settingsPath = dataPaths.settings;
         initializeGameLanguageSetting(loadGameLanguage(settingsPath));
         if (overrideLanguage) overrideGameLanguageForRun(commandLineLanguage);
         setFieldOfViewSetting(overrideFov ? commandLineFov : DarkRecomp::loadFieldOfView(settingsPath));
@@ -296,9 +328,11 @@ int wmain(int argc, wchar_t** argv) {
         if (enginePreview) enableEnginePreview();
         if (!previewFrame.empty() && std::filesystem::exists(previewFrame))
             throw std::runtime_error("Preview frame path already exists");
+        if (!testQuitPath.empty() && std::filesystem::exists(testQuitPath))
+            throw std::runtime_error("Diagnostic quit file must not exist at startup");
         Memory addressSpace;
         memory = &addressSpace;
-        addressSpace.load(gameDir);
+        addressSpace.load(gameDir, userDataDirectory);
         PPCContext ctx{};
         addressSpace.initThread(ctx);
         initializeKernel();
@@ -350,11 +384,15 @@ int wmain(int argc, wchar_t** argv) {
         }
         RECT client{0, 0, LONG(restoredSize.width), LONG(restoredSize.height)};
         AdjustWindowRect(&client, WS_OVERLAPPEDWINDOW, FALSE);
+        StartupTrace::mark("window-create.begin");
         HWND window = CreateWindowW(windowClass.lpszClassName, L"The Darkness - DarkRecomp",
             WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
             client.right - client.left, client.bottom - client.top, nullptr, nullptr,
             windowClass.hInstance, nullptr);
         if (!window) throw std::runtime_error("Cannot create native display window");
+        StartupTrace::mark("window-create.end");
+        NativeStartupMessagePump startupPump(window);
+        startupPump.pump();
         NativeDisplayWindow displayWindow(window);
         if (fullscreen) displayWindow.toggleFullscreen();
         nativeInput().attachWindow(window);
@@ -383,7 +421,11 @@ int wmain(int argc, wchar_t** argv) {
         mouse.setRenderHeight(renderSize.height);
         if (!setNativeVideoMode(renderSize.width / resolutionScale, renderSize.height / resolutionScale))
             throw std::runtime_error("Requested render aspect or size is unsupported");
+        StartupTrace::mark("display-init.begin");
+        startupPump.pump();
         display.Init(window, uint32_t(actualClient.right), uint32_t(actualClient.bottom));
+        startupPump.pump();
+        StartupTrace::mark("display-init.end");
         setMenuPointerDisplay(renderSize.width, renderSize.height, uint32_t(actualClient.right),
                               uint32_t(actualClient.bottom), stretchToFill);
         displayResizePending = false;
@@ -422,10 +464,17 @@ int wmain(int argc, wchar_t** argv) {
         puts("[Boot] Native D3D11 display initialized; calling original game entry at 0x828AA3E8");
         std::unique_ptr<DarkRecomp::EnginePreviewD3D11> preview;
         if (enginePreview) {
+            StartupTrace::mark("engine-preview.begin");
             preview = std::make_unique<DarkRecomp::EnginePreviewD3D11>(display.GetDevice(), display.GetContext(), display.GetSwapChain(),
                                                                     renderSize.width, renderSize.height, resolutionScale,true,
-                                                                    stretchToFill);
+                                                                    stretchToFill, [&] { startupPump.pump(); });
+            StartupTrace::mark("engine-preview.end");
             preview->setDiagnostics(!rendererTrace.empty() && !manualShadowCapture);
+            if(!texturePackPath.empty() || !textureDumpPath.empty()) {
+                DarkRecomp::TextureMods::Config textures;
+                textures.packDirectory=texturePackPath; textures.dumpDirectory=textureDumpPath;
+                preview->configureTextureMods(textures);
+            }
             setPreviewTextureBudget(preview->textureBudget());
             setPreviewFrameBackpressure(true,true);
             puts("[EnginePreview] Experimental original text, YUV video and BC1/BC3 color rendering; unsupported materials are skipped.");
@@ -452,6 +501,9 @@ int wmain(int argc, wchar_t** argv) {
             });
         if (!testInputPath.empty())
             std::puts("[InputTest] script reads run on an owned worker; complete newline commands publish after two matching reads (250ms polling plus 250ms dispatch, normally about 750ms total latency).");
+        NativeTestInputFileReader testQuitReader(testQuitPath, NativeTestInputFileReader::readQuitFile);
+        if (!testQuitPath.empty())
+            std::puts("[InputTest] Opt-in quit-file worker active; create the new file with one complete 'quit' line to request normal window shutdown.");
         bool testMouse=false;LONG testMouseX=0,testMouseY=0;
         InputCounters testMouseBase{};
         ULONGLONG testMouseUntil=0,nextMouseSample=0;
@@ -471,8 +523,21 @@ int wmain(int argc, wchar_t** argv) {
         // Present/input thread above normal: level loads saturate cores with
         // engine workers and previously starved presentation for seconds.
         configureGameThread("display",1,THREAD_PRIORITY_ABOVE_NORMAL);
+        struct StartupSceneWorkers {
+            SceneWorkPool* pool = nullptr;
+            ~StartupSceneWorkers() { if (pool) pool->stopForStartupCancellation(); }
+        } startupWorkers;
         initializeSceneWorkers(sceneWorkers);
+        startupWorkers.pool = &sceneWorkPool();
+        startupPump.finish(); // Final poll covers worker initialization, before guest creation.
+        displayResizePending = displayResizePending || startupPump.resizePending();
+        // Reattach clears host key/button/mouse history, then refresh actual
+        // focus. Inputs ignored during loading cannot replay into the guest.
+        nativeInput().attachWindow(window);
+        nativeInput().windowMessage(window, WM_ACTIVATEAPP, GetForegroundWindow() == window, 0);
+        StartupTrace::mark("guest-thread-create.begin");
         std::thread guest([&] {
+            StartupTrace::mark("guest-thread.enter");
             configureGameThread("engine",0);
             // The guest context is thread-local for diagnostics and APC delivery.
             currentContext = &ctx;
@@ -483,6 +548,8 @@ int wmain(int argc, wchar_t** argv) {
             if (guestStatus) { StallProfiler::shutdown(); fflush(nullptr); terminateNativeProcess(guestStatus); }
             PostMessageW(window, WM_CLOSE, 0, 0);
         });
+        startupWorkers.pool = nullptr; // Guest creation succeeded: retain normal pool lifetime.
+        StartupTrace::mark("guest-thread-create.end");
 
         NativeCpuSampler sampler(guest.native_handle(),sampleEngine,sampleWorkers,sampleRendererCpu);
         MSG message{};
@@ -506,6 +573,8 @@ int wmain(int argc, wchar_t** argv) {
         // other loop logic appear in frame totals between the child scopes.
         StallProfiler::Scope stallDisplay(StallProfiler::Section::Other, "native display loop");
         StallProfiler::frameBoundary("display");
+        bool firstMessagePump = true;
+        StartupTrace::mark("display-loop-pump.first.begin");
         while (message.message != WM_QUIT) {
             FrameMetrics::Clock::time_point loopTop{}, afterPump{}, takeEnd{}, renderEnd{}, postEnd{}, pacerEnd{};
             if (outlierOn) {
@@ -544,7 +613,19 @@ int wmain(int argc, wchar_t** argv) {
                 DispatchMessageW(&message);
             }
             }
+            if (firstMessagePump) {
+                StartupTrace::mark("display-loop-pump.first.end");
+                firstMessagePump = false;
+            }
             if (message.message == WM_QUIT) break;
+            if (!testQuitPath.empty()) {
+                const auto quit = testQuitReader.latest();
+                if (quit && quit->size() == 1 && quit->front() == "quit") {
+                    std::puts("[InputTest] quit-file requested; closing native display normally.");
+                    PostMessageW(window, WM_CLOSE, 0, 0);
+                    continue;
+                }
+            }
             {
                 StallProfiler::Scope update(StallProfiler::Section::Other, "native achievements update");
                 if (!developerTools.isOpen() && !keyboardMenuInputBlocked()) achievements.update();
@@ -1044,8 +1125,12 @@ int wmain(int argc, wchar_t** argv) {
             }
         }
         setPreviewFrameBackpressure(false);
+        if(preview)preview->stopTextureMods();
         timerResolution.stop();
+        testQuitReader.stop();
         testInputReader.stop();
+        if (!testQuitPath.empty())
+            std::puts("[InputTest] diagnostic file workers stopped and joined.");
         sampler.stop();
         developerTools.close();
         achievements.close();
@@ -1060,6 +1145,14 @@ int wmain(int argc, wchar_t** argv) {
         StallProfiler::shutdown();
         fflush(nullptr);
         terminateNativeProcess(0);
+    } catch (const NativeStartupCanceled& canceled) {
+        setNativeDisplayContext(nullptr);
+        nativeInput().attachWindow(nullptr);
+        std::fprintf(stderr,"[Startup] canceled before guest execution; renderer resources/window released; reason=%s exit=%d.\n",
+            canceled.reason, canceled.exitCode);
+        StallProfiler::shutdown();
+        fflush(nullptr);
+        return canceled.exitCode;
     } catch (const std::exception& error) {
         fprintf(stderr, "[ERROR] %s\n", error.what());
         StallProfiler::shutdown();

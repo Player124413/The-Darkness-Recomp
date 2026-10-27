@@ -14,11 +14,14 @@
 #include "ppc_context.h"
 #include "native_menu_assets.h"
 #include "developer_weapon_assets.h"
+#include "user_data_paths.h"
+#include "video_mods.h"
 
 namespace DarkRecomp { class CDisplayContextD3D11; }
 
 namespace DarkRecomp::Native {
 class XmaBridge;
+class XmaSourceProbe;
 constexpr uint64_t kTimebaseFrequency = 49875000;
 class Memory {
 public:
@@ -28,7 +31,11 @@ public:
     Memory& operator=(const Memory&) = delete;
     uint8_t* base() const { return base_; }
     const std::filesystem::path& gameDirectory() const { return gameDir_; }
+    const UserDataPaths& userDataPaths() const { return userDataPaths_; }
     const NativeMenuAssets& nativeMenuAssets() const { return nativeMenuAssets_; }
+    std::shared_ptr<const VideoModFile> videoModFile(const std::filesystem::path& original) const {
+        return videoMods_ ? videoMods_->find(original) : nullptr;
+    }
     void enableDeveloperWeaponAssets(PPCContext& ctx, uint8_t* base);
     std::shared_ptr<const CachedWeaponFile> developerWeaponFile(const std::filesystem::path& path) const;
     bool commit(uint32_t address, uint32_t size);
@@ -50,7 +57,7 @@ public:
     // C uses separate views of the same backing. Native callers of raw
     // VirtualProtect must split C spans at cViewEnd; page-local calls remain
     // valid. Memory's commit/release split internally; A/E are unchanged.
-    void load(const std::filesystem::path& gameDir);
+    void load(const std::filesystem::path& gameDir, const std::filesystem::path& userDataDirectory = {});
     void initThread(PPCContext& ctx);
     void initThreadStorage(uint32_t pcr, uint32_t stackLow, uint32_t stackSize, uint32_t id);
     uint32_t dynamicTls(const PPCContext& ctx) const;
@@ -84,7 +91,9 @@ private:
     uint8_t* base_ = nullptr;
     std::vector<std::pair<uint32_t, bool>> memoryViews_;
     std::filesystem::path gameDir_;
+    UserDataPaths userDataPaths_;
     NativeMenuAssets nativeMenuAssets_;
+    std::shared_ptr<const VideoModPack> videoMods_;
     std::atomic<std::shared_ptr<const DeveloperWeaponAssets>> developerWeaponAssets_;
     uint32_t headerSize_ = 0;
     std::vector<uint8_t> tlsInitial_;
@@ -94,6 +103,7 @@ private:
     uint32_t xmaPool_ = 0;
     bool xmaUsed_[320] = {};
     std::unique_ptr<XmaBridge> xmaBridge_;
+    std::unique_ptr<XmaSourceProbe> xmaSourceProbe_;
     std::thread timestampThread_;
     std::atomic<bool> timestampStop_{false};
     uint64_t timestampEpochQpc_ = 0;

@@ -124,6 +124,51 @@ void testScriptReader() {
     NativeTestInputFileReader unused(std::filesystem::path{});
     require(!unused.latest(), "Ordinary gameplay unexpectedly has a diagnostic snapshot");
 }
+
+void testQuitFileReader() {
+    TestScript quitFile;
+    TestEvent stop;
+    for (const auto bytes : {"", "quit", "quit ", "QUIT\n", "quit\nextra", "quit\n\n", "87\n"}) {
+        quitFile.write(bytes);
+        require(!NativeTestInputFileReader::readQuitFile(quitFile.path, stop.value),
+                "Incomplete or extra quit-file bytes requested shutdown");
+    }
+    for (const auto bytes : {"quit\n", "quit\r\n"}) {
+        quitFile.write(bytes);
+        require(NativeTestInputFileReader::readQuitFile(quitFile.path, stop.value) == "quit\n",
+                "Complete quit-file line was not normalized");
+    }
+
+    quitFile.write("quit");
+    std::atomic<unsigned> quitReads = 0;
+    NativeTestInputFileReader quitReader(quitFile.path,
+        [&](const std::filesystem::path& path, HANDLE stopped) {
+            ++quitReads;
+            return NativeTestInputFileReader::readQuitFile(path, stopped);
+        }, 1);
+    const auto until = GetTickCount64() + 5000;
+    while (quitReads.load() < 20 && GetTickCount64() < until) Sleep(1);
+    require(quitReads.load() >= 20 && !quitReader.latest(), "Partial quit line was published");
+
+    // Script I/O may be blocked or its current command invalid. Shutdown has
+    // a separate owned worker and never waits for that script's publication.
+    TestEvent scriptBlocked;
+    NativeTestInputFileReader blockedScript(L"blocked-script",
+        [&](const std::filesystem::path&, HANDLE stopped) -> std::optional<std::string> {
+            SetEvent(scriptBlocked.value);
+            WaitForSingleObject(stopped, INFINITE);
+            return {};
+        }, 1);
+    require(WaitForSingleObject(scriptBlocked.value, 5000) == WAIT_OBJECT_0,
+            "Script read did not block for independent quit test");
+    quitFile.write("quit\n");
+    waitSnapshot(quitReader, {"quit"});
+    quitFile.write("");
+    const auto publishedQuit = quitReader.latest();
+    require(publishedQuit && *publishedQuit == std::vector<std::string>{"quit"},
+            "A published quit request was revoked by a later file change");
+    blockedScript.stop(); quitReader.stop();
+}
 }
 int main() {
     try {
@@ -213,6 +258,7 @@ int main() {
                 isTestInputKey(VK_F5) && isTestInputKey(VK_F6),
                 "allowlist lost a mapped key");
         testScriptReader();
+        testQuitFileReader();
         puts("Test input parser contract: historical holds, explicit 1/10000, "
              "rejected bad/trailing/sign/overflow, unchanged outputs, and "
              "gameplay keys plus F5/F6; asynchronous script snapshots preserve "

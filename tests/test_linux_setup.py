@@ -297,6 +297,99 @@ class LinuxSetupTests(SetupFixture):
             self.setup()
         self.assertFalse(self.install.exists())
 
+    def test_release_resources_are_managed_and_unrelated_tools_are_excluded(self):
+        resources = {name: ("release " + name).encode() for name in setup_linux.OPTIONAL_RELEASE_FILES}
+        resources.update({"ThirdParty/README.txt": b"third-party notices",
+                          "ThirdParty/audio/COPYING.LGPLv2.1": b"audio license",
+                          "ThirdParty/audio/source.tar.gz": b"source archive"})
+        for name, contents in resources.items():
+            path = self.source / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
+        (self.source / "tools/private-build-tool.py").write_bytes(b"do not install")
+        (self.source / "private-development-notes.txt").write_bytes(b"do not install")
+        before_source = self.snapshot(self.source)
+        installed = self.setup()
+        for name, contents in resources.items():
+            self.assertEqual((self.install / "game" / name).read_bytes(), contents)
+            self.assertEqual(installed["files"]["game/" + name], hashlib.sha256(contents).hexdigest())
+        self.assertFalse((self.install / "game/tools/private-build-tool.py").exists())
+        self.assertFalse((self.install / "game/private-development-notes.txt").exists())
+        self.assertEqual(self.snapshot(self.source), before_source)
+        before_install = self.snapshot(self.install)
+        self.assertEqual(self.setup(umu_archive=None, proton_archive=None), installed)
+        self.assertEqual(self.snapshot(self.install), before_install)
+
+    def test_release_resource_updates_preserve_modified_and_unmanaged_files(self):
+        source = self.source / "README.md"
+        source.write_bytes(b"original instructions")
+        self.setup()
+        destination = self.install / "game/README.md"
+        source.write_bytes(b"updated instructions")
+        self.setup(umu_archive=None, proton_archive=None)
+        self.assertEqual(destination.read_bytes(), b"updated instructions")
+        destination.write_bytes(b"personal changes")
+        source.write_bytes(b"newer instructions")
+        before = self.snapshot(self.install)
+        with self.assertRaisesRegex(setup_linux.SetupError, "modified|preserving"):
+            self.setup(umu_archive=None, proton_archive=None)
+        self.assertEqual(self.snapshot(self.install), before)
+
+        source.write_bytes(b"personal changes")
+        (self.source / "COPYING").write_bytes(b"release license")
+        (self.install / "game/COPYING").write_bytes(b"unmanaged license")
+        before = self.snapshot(self.install)
+        with self.assertRaisesRegex(setup_linux.SetupError, "unmanaged|preserving"):
+            self.setup(umu_archive=None, proton_archive=None)
+        self.assertEqual(self.snapshot(self.install), before)
+
+    def test_linked_release_resources_are_rejected_before_installation(self):
+        outside = self.root / "outside release"
+        outside.mkdir()
+        (outside / "license.txt").write_bytes(b"outside license")
+        third_party = self.source / "ThirdParty"
+        for path, target in ((self.source / "COPYING", outside / "license.txt"),
+                             (self.source / "tools/add_steam_shortcut.py", outside / "license.txt"),
+                             (third_party, outside),
+                             (third_party / "audio", outside),
+                             (third_party / "license.txt", outside / "license.txt")):
+            with self.subTest(path=path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.symlink_to(target, target_is_directory=target.is_dir())
+                try:
+                    with self.assertRaisesRegex(setup_linux.SetupError, "links"):
+                        self.setup()
+                    self.assertFalse(self.install.exists())
+                finally:
+                    path.unlink()
+        tools = self.source / "tools"
+        original_tools = self.source / "original tools"
+        tools.rename(original_tools)
+        tools.symlink_to(outside, target_is_directory=True)
+        try:
+            with self.assertRaisesRegex(setup_linux.SetupError, "links"):
+                self.setup()
+            self.assertFalse(self.install.exists())
+        finally:
+            tools.unlink()
+            original_tools.rename(tools)
+
+    def test_unreadable_release_resources_are_rejected_before_installation(self):
+        third_party = self.source / "ThirdParty/audio"
+        third_party.mkdir(parents=True)
+        (third_party / "COPYING").write_bytes(b"audio license")
+        scandir = os.scandir
+
+        def deny_audio(path):
+            if Path(path) == third_party:
+                raise PermissionError(13, "Permission denied", os.fspath(path))
+            return scandir(path)
+
+        with patch.object(setup_linux.os, "scandir", side_effect=deny_audio):
+            with self.assertRaisesRegex(setup_linux.SetupError, "Cannot read release resources"):
+                self.setup()
+        self.assertFalse(self.install.exists())
+
     def test_missing_game_root_fails_before_installation(self):
         for name in ("default.xex", "Content", "System"):
             with self.subTest(name=name):

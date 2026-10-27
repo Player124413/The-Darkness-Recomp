@@ -26,7 +26,7 @@ using DeveloperWeaponAssets = std::map<std::string, std::shared_ptr<const Cached
 // before every read. Keys are lowercase
 // Content-relative paths, including "content\\". Throws on invalid sources.
 DeveloperWeaponAssets prepareDeveloperWeaponAssets(PPCContext& ctx, uint8_t* base,
-    const std::filesystem::path& gameDirectory);
+    const std::filesystem::path& gameDirectory, const std::filesystem::path& cacheDirectory = {});
 
 namespace DeveloperWeaponAssetDetail {
 struct Segment { uint32_t offset = 0; std::vector<uint8_t> bytes; };

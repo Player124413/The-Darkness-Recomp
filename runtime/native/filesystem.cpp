@@ -68,6 +68,7 @@ struct PathResult {
     bool writable = false;
     uint32_t status = 0;
     std::shared_ptr<const CachedWeaponFile> cachedWeaponFile;
+    std::shared_ptr<const VideoModFile> videoModFile;
 };
 PathResult resolve(uint32_t attributes) {
     PathResult result;
@@ -97,8 +98,12 @@ PathResult resolve(uint32_t attributes) {
     } else if (lower == "\\device\\cdrom0" || lower.starts_with("\\device\\cdrom0\\")) {
         mount = memory->gameDirectory(); prefix = 14;
     } else if (lower.starts_with("cache:") || lower.starts_with("cache0:")) {
-        mount = memory->gameDirectory().parent_path() / "build_native/run/cache";
+        mount = memory->userDataPaths().isolated ? memory->userDataPaths().guestCache
+                                                : memory->gameDirectory().parent_path() / "build_native/run/cache";
         prefix = lower.find(':') + 1; result.writable = true;
+        if (memory->userDataPaths().isolated && !ordinaryUserDataPath(mount, UserDataPathKind::Directory)) {
+            result.status = nameInvalid; return result;
+        }
         std::filesystem::create_directories(mount);
     } else if (auto colon = lower.find(':'); colon != std::string::npos) {
         auto mounted = Storage::LookupMount(lower.substr(0, colon));
@@ -141,6 +146,9 @@ PathResult resolve(uint32_t attributes) {
             return result;
         }
     }
+    if (memory->userDataPaths().isolated && result.writable && !ordinaryUserDataPath(mount / relative)) {
+        result.status = nameInvalid; return result;
+    }
     result.path = std::filesystem::weakly_canonical(mount / relative);
     auto rootString = std::filesystem::weakly_canonical(mount).wstring();
     auto pathString = result.path.wstring();
@@ -170,8 +178,18 @@ PathResult resolve(uint32_t attributes) {
             result.path = result.cachedWeaponFile->path;
             result.path.make_preferred();
         }
+        result.videoModFile = memory->videoModFile(result.path);
     }
     return result;
+}
+std::wstring nativeFilePath(const PathResult& resolved) {
+    if (!resolved.videoModFile) return L"\\??\\" + resolved.path.wstring();
+    auto path = resolved.videoModFile->path;
+    path.make_preferred();
+    auto name = path.wstring();
+    if (name.starts_with(L"\\\\?\\")) name.erase(0, 4);
+    else if (name.starts_with(L"\\\\")) name = L"UNC\\" + name.substr(2);
+    return L"\\??\\" + name;
 }
 uint32_t create(PPCContext& ctx, uint32_t out, uint32_t access, uint32_t attributes, uint32_t ios,
                 uint32_t allocationPointer, uint32_t fileAttributes, uint32_t sharing, uint32_t disposition, uint32_t options) {
@@ -188,10 +206,15 @@ uint32_t create(PPCContext& ctx, uint32_t out, uint32_t access, uint32_t attribu
     constexpr uint32_t writeAccess = GENERIC_WRITE | GENERIC_ALL | DELETE | FILE_WRITE_DATA | FILE_APPEND_DATA |
         FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
     if (!status && !resolved.writable && ((access & writeAccess) || disposition != 1 || (options & 0x1000))) status = writeProtected;
+    std::shared_ptr<const VideoModReadLease> videoLease;
+    if (!status && resolved.videoModFile) {
+        videoLease = VideoModReadLease::acquire(resolved.videoModFile, access, sharing);
+        if (!videoLease) status = 0xc0000043; // STATUS_SHARING_VIOLATION
+    }
     HANDLE handle = nullptr;
     IO_STATUS_BLOCK nativeIo{};
     if (!status) {
-        std::wstring nativePath = L"\\??\\" + resolved.path.wstring();
+        std::wstring nativePath = nativeFilePath(resolved);
         UNICODE_STRING name{USHORT(nativePath.size() * 2), USHORT(nativePath.size() * 2), nativePath.data()};
         OBJECT_ATTRIBUTES attrs{};
         InitializeObjectAttributes(&attrs, &name, memory->read32(attributes + 8) & 0x40, nullptr, nullptr);
@@ -200,7 +223,8 @@ uint32_t create(PPCContext& ctx, uint32_t out, uint32_t access, uint32_t attribu
         using Create = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
             PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
         status = uint32_t(nt<Create>(ctx, "NtCreateFile")(&handle, access, &attrs, &nativeIo,
-            allocationPointer ? &allocation : nullptr, fileAttributes, sharing, disposition, options, nullptr, 0));
+            allocationPointer ? &allocation : nullptr, fileAttributes,
+            resolved.videoModFile ? sharing | FILE_SHARE_READ : sharing, disposition, options, nullptr, 0));
         if (int32_t(status) >= 0) {
             uint32_t id = storeObject(handle);
             auto stored = object(id);
@@ -208,6 +232,11 @@ uint32_t create(PPCContext& ctx, uint32_t out, uint32_t access, uint32_t attribu
             stored->unbuffered = (options & 8) != 0;
             stored->fileOpenOptions = options;
             stored->cachedWeaponFile = std::move(resolved.cachedWeaponFile);
+            stored->videoModFile = std::move(resolved.videoModFile);
+            stored->videoModReadLease = std::move(videoLease);
+            if (stored->videoModFile && stored->videoModFile->firstOpen())
+                std::printf("[VideoMods] Opened replacement for '%ls' (%llu bytes).\n",
+                    stored->path.c_str(), static_cast<unsigned long long>(stored->videoModFile->bytes));
             memory->write32(out, id);
         }
     }
@@ -241,7 +270,7 @@ PPC_FUNC(__imp__NtQueryFullAttributesFile) {
     PathResult resolved = resolve(attributes);
     uint32_t status = resolved.status;
     if (!status) {
-        std::wstring nativePath = L"\\??\\" + resolved.path.wstring();
+        std::wstring nativePath = nativeFilePath(resolved);
         UNICODE_STRING name{USHORT(nativePath.size() * 2), USHORT(nativePath.size() * 2), nativePath.data()};
         OBJECT_ATTRIBUTES attrs{};
         InitializeObjectAttributes(&attrs, &name, memory->read32(attributes + 8) & 0x40, nullptr, nullptr);

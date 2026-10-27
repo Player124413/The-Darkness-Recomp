@@ -3,6 +3,7 @@
 #include "stall_profiler.h"
 #include "audio_driver.h"
 #include "xma_bridge.h"
+#include "xma_source_probe.h"
 #include "ppc_image_metadata.h"
 #include "xex_image.h"
 #include "timebase_scale.h"
@@ -15,6 +16,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <new>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -282,6 +284,10 @@ uint32_t Memory::xmaCreate() {
         xmaUsed_[i] = true;
         uint32_t context = pool + i * kXmaContextBytes;
         memset(base_ + context, 0, kXmaContextBytes);
+        if (xmaSourceProbeEnabled()) {
+            if (!xmaSourceProbe_) xmaSourceProbe_.reset(new (std::nothrow) XmaSourceProbe);
+            if (xmaSourceProbe_) xmaSourceProbe_->created(base_, i, context);
+        }
         return context;
     }
     return 0;
@@ -293,6 +299,7 @@ bool Memory::xmaFree(uint32_t context) {
         return false;
     uint32_t slot = (context - xmaPool_) / kXmaContextBytes;
     if (!xmaUsed_[slot]) return false;
+    if (xmaSourceProbe_) xmaSourceProbe_->freed(slot, context);
     if (xmaBridge_) xmaBridge_->reset(slot);
     xmaUsed_[slot] = false;
     memset(base_ + context, 0, kXmaContextBytes);
@@ -346,14 +353,18 @@ const char* Memory::xmaDecodeRecords(uint32_t records, uint32_t count, uint32_t&
 }
 void Memory::xmaReset(uint32_t context) {
     std::lock_guard lock(mutex_);
+    if (xmaSourceProbe_ && xmaOwned(context))
+        xmaSourceProbe_->reset((context-xmaPool_)/kXmaContextBytes, context);
     if (xmaBridge_ && xmaPool_ && context >= xmaPool_ && context < xmaPool_ + kXmaContexts*kXmaContextBytes &&
         (context-xmaPool_) % kXmaContextBytes == 0)
         xmaBridge_->reset((context-xmaPool_)/kXmaContextBytes);
 }
 
-void Memory::load(const std::filesystem::path& gameDir) {
+void Memory::load(const std::filesystem::path& gameDir, const std::filesystem::path& userDataDirectory) {
     StallProfiler::Scope profile(StallProfiler::Section::FileIO, "Memory::load");
     gameDir_ = std::filesystem::weakly_canonical(gameDir);
+    userDataPaths_ = resolveUserDataPaths(gameDir_, userDataDirectory);
+    videoMods_.reset();
     std::ifstream file(gameDir / "default.xex", std::ios::binary | std::ios::ate);
     if (!file) throw std::runtime_error("Game directory must contain the original default.xex");
     const auto fileSize = file.tellg();
@@ -416,7 +427,15 @@ void Memory::load(const std::filesystem::path& gameDir) {
     const DWORD executableLength = GetModuleFileNameW(nullptr, executable, DWORD(std::size(executable)));
     if (executableLength && executableLength < std::size(executable))
         nativeMenuAssets_ = prepareNativeMenuAssets(gameDir_, std::filesystem::path(executable).parent_path(),
-                                                  russianNativeMenus());
+            russianNativeMenus(), userDataPaths_.isolated ? userDataPaths_.menuCache : std::filesystem::path{});
+    if (const wchar_t* packDirectory = _wgetenv(L"DARK_VIDEO_MOD_DIR"); packDirectory && *packDirectory) {
+        try {
+            videoMods_ = VideoModPack::load(gameDir_, packDirectory);
+            std::printf("[VideoMods] Loaded %zu read-only video replacements.\n", videoMods_->size());
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "[VideoMods] Pack disabled; original videos retained: %s\n", error.what());
+        }
+    }
     printf("[AOT] Verified game image (%s); mapped %zu native functions.\n", decoded.revisionName, count);
 }
 uint32_t Memory::headerField(uint32_t key) const {
@@ -436,7 +455,8 @@ void Memory::enableDeveloperWeaponAssets(PPCContext& ctx, uint8_t* base) {
     if (base != base_) throw std::runtime_error("invalid weapon resource memory");
     if (developerWeaponAssets_.load(std::memory_order_acquire)) return;
     auto assets = std::make_shared<const DeveloperWeaponAssets>(
-        prepareDeveloperWeaponAssets(ctx, base, gameDir_));
+        prepareDeveloperWeaponAssets(ctx, base, gameDir_,
+            userDataPaths_.isolated ? userDataPaths_.developerCache : std::filesystem::path{}));
     developerWeaponAssets_.store(std::move(assets), std::memory_order_release);
 }
 std::shared_ptr<const CachedWeaponFile> Memory::developerWeaponFile(const std::filesystem::path& path) const {

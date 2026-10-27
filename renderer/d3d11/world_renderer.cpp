@@ -5,6 +5,7 @@
 #include "shader_bytecode_cache.h"
 #include "texture_budget_policy.h"
 #include "runtime/native/graphics_settings.h"
+#include "runtime/native/startup_trace.h"
 #include "renderer/engine/prompt_icons.h"
 #include "renderer/engine/prompt_layout.h"
 #include "renderer/engine/subtitle_font.h"
@@ -30,6 +31,158 @@ namespace DarkRecomp {
 namespace {
 void check(HRESULT hr,const char* op) {if (FAILED(hr)) throw std::runtime_error(std::string(op)+": "+std::to_string(hr));}
 uint32_t word(const uint8_t* b) {return uint32_t(b[0])<<24|uint32_t(b[1])<<16|uint32_t(b[2])<<8|b[3];}
+using BlurRect=std::array<uint32_t,4>;
+bool blurRectEmpty(const BlurRect& r) {return r[0]>=r[2] || r[1]>=r[3];}
+bool blurRectOverlaps(const BlurRect& a,const BlurRect& b) {
+    return !blurRectEmpty(a) && !blurRectEmpty(b) && a[0]<b[2] && b[0]<a[2] && a[1]<b[3] && b[1]<a[3];
+}
+BlurRect blurRectIntersection(const BlurRect& a,const BlurRect& b) {
+    BlurRect r{(std::max)(a[0],b[0]),(std::max)(a[1],b[1]),(std::min)(a[2],b[2]),(std::min)(a[3],b[3])};
+    return blurRectEmpty(r)?BlurRect{}:r;
+}
+void invalidateBlurRect(BlurRect& known,const BlurRect& written) {
+    if(blurRectOverlaps(known,written))known={};
+}
+struct FlatPostQuad {
+    BlurRect rectangle{};
+    std::array<double,4> screen{};
+    std::array<std::array<double,2>,4> uv{}; // x/y corner bits, not index order.
+};
+std::optional<FlatPostQuad> flatPostQuad(const Native::WorldDraw& draw,unsigned scale) {
+    const auto& g=draw.geometry;const auto& o=draw.options;
+    if(!g || g.vertices->vertexCount!=4 || g.indexCount!=6 ||
+       g.firstIndex>g.indices->indices.size() || g.indices->indices.size()-g.firstIndex<6 ||
+       o.weights || o.positionConversion || o.normal || o.tangents || o.vertexColor ||
+       o.modes[0]!=0 || o.conversions[0] || o.matrices[0] || o.coordinates[0]>=8 ||
+       !draw.viewport[2] || !draw.viewport[3] ||
+       uint64_t(draw.viewport[0])+draw.viewport[2]>16384 ||
+       uint64_t(draw.viewport[1])+draw.viewport[3]>16384 || draw.clipPlanes.enabledMask())return {};
+    // Limit the proof to separable postprocess projections. A general matrix
+    // can cancel huge float products into an apparently aligned double result.
+    const auto& m=draw.constants.vectors;
+    if(!scale || scale>3 || !m[0][0] || m[0][1] || m[0][2] || m[0][3] ||
+       !m[1][1] || m[1][0] || m[1][2] || m[1][3] || m[3][0] || m[3][1] ||
+       bool(m[3][2])==bool(m[3][3]))return {};
+    const auto normalOrZero=[](float x) {return std::isfinite(x) && (x==0 || std::abs(x)>=0x1p-126f);};
+    for(unsigned row=0;row<4;++row)for(float x:m[row])if(!normalOrZero(x))return {};
+    for(float x:m[7])if(!normalOrZero(x))return {};
+    std::vector<Native::WorldVertex> vertices;
+    if(!Native::decodeWorldVertices(*g.vertices,vertices) || vertices.size()!=4)return {};
+    FlatPostQuad result;
+    std::array<std::array<double,2>,4> screen{};
+    double commonW=0;std::array<double,2> screenError{};
+    constexpr double epsilon=0x1p-23;
+    for(unsigned v=0;v<4;++v) {
+        std::array<double,4> clip{},clipError{};double depthMagnitude=0;
+        for(unsigned row=0;row<4;++row)for(unsigned column=0;column<4;++column) {
+            if(!normalOrZero(vertices[v].position[column]))return {};
+            const float p=vertices[v].position[column]+m[7][column];
+            if(!normalOrZero(p))return {};
+            const double term=double(m[row][column])*p;
+            if(term && (std::abs(term)<0x1p-126 || std::abs(term)>0x1.fffffep127))return {};
+            clip[row]+=term;clipError[row]+=std::abs(term)*8*epsilon;
+            if(row==2)depthMagnitude+=std::abs(term);
+        }
+        // Bound every float DP4 partial sum independently of depthDelta.
+        // Even a zero depth delta cannot make 0 * infinity a valid clip depth.
+        if(depthMagnitude>0x1p126)return {};
+        if(!std::all_of(clip.begin(),clip.end(),[](double x){return std::isfinite(x);}) ||
+           clip[3]<0x1p-12 || clip[3]>0x1p20 || clip[3]<=clipError[3])return {};
+        if(v && clip[3]!=commonW)return {};
+        commonW=clip[3];
+        const double nativeZ=double(draw.depthRange[0])*clip[3]+double(draw.depthRange[1]-draw.depthRange[0])*clip[2];
+        const double depthDelta=double(draw.depthRange[1]-draw.depthRange[0]);
+        const double zError=std::abs(double(draw.depthRange[0]))*clipError[3]+std::abs(depthDelta)*clipError[2]+
+            4*epsilon*(std::abs(double(draw.depthRange[0])*clip[3])+std::abs(depthDelta*clip[2]));
+        if(!std::isfinite(nativeZ) || !std::isfinite(zError) || nativeZ-zError<0 ||
+           nativeZ+zError>clip[3]-clipError[3])return {};
+        for(unsigned c=0;c<2;++c) {
+            double low=INFINITY,high=-INFINITY;
+            for(int numerator:{-1,1})for(int denominator:{-1,1}) {
+                const double ratio=(clip[c]+numerator*clipError[c])/(clip[3]+denominator*clipError[3]);
+                low=(std::min)(low,ratio);high=(std::max)(high,ratio);
+            }
+            const double center=clip[c]/clip[3];
+            const double error=(std::max)(center-low,high-center)*draw.viewport[c+2]*.5+8*epsilon*draw.viewport[c+2];
+            screenError[c]=(std::max)(screenError[c],error);
+        }
+        screen[v]={draw.viewport[0]+(clip[0]/clip[3]+1)*draw.viewport[2]*.5,
+                   draw.viewport[1]+(1-clip[1]/clip[3])*draw.viewport[3]*.5};
+    }
+    result.screen={screen[0][0],screen[0][1],screen[0][0],screen[0][1]};
+    for(const auto& p:screen)for(unsigned c=0;c<2;++c) {
+        result.screen[c]=(std::min)(result.screen[c],p[c]);
+        result.screen[c+2]=(std::max)(result.screen[c+2],p[c]);
+    }
+    for(unsigned i=0;i<4;++i) {
+        const double rounded=std::round(result.screen[i]);
+        // Stay inside half the distance to the closest standard 8x-MSAA
+        // sample (1/16 physical pixel from an integer boundary), including
+        // the bounded float transform and viewport arithmetic above.
+        if(std::abs(rounded-result.screen[i])+screenError[i%2]>=1.0/(32*scale) || rounded<draw.viewport[i%2] ||
+           rounded>double(draw.viewport[i%2])+draw.viewport[i%2+2])return {};
+        result.rectangle[i]=uint32_t(rounded);
+    }
+    if(blurRectEmpty(result.rectangle))return {};
+    unsigned corners=0;std::array<unsigned,4> cornerByVertex{};
+    for(unsigned v=0;v<4;++v) {
+        unsigned corner=0;
+        for(unsigned c=0;c<2;++c) {
+            if(screen[v][c]==result.screen[c+2])corner|=1u<<c;
+            else if(screen[v][c]!=result.screen[c])return {};
+        }
+        if(corners&(1u<<corner))return {};
+        corners|=1u<<corner;cornerByVertex[v]=corner;
+        for(unsigned c=0;c<2;++c) {
+            const double uv=vertices[v].tex[o.coordinates[0]][c];
+            if(!std::isfinite(uv) || uv<0 || uv>1)return {};
+            result.uv[corner][c]=uv;
+        }
+    }
+    std::array<unsigned,2> absent{};
+    for(unsigned triangle=0;triangle<2;++triangle) {
+        unsigned mask=0;
+        for(unsigned n=0;n<3;++n) {
+            const auto index=g.indices->indices[g.firstIndex+triangle*3+n];
+            if(index>=4)return {};
+            mask|=1u<<cornerByVertex[index];
+        }
+        if(std::popcount(mask)!=3)return {};
+        absent[triangle]=std::countr_zero(15u^mask);
+    }
+    if((absent[0]^absent[1])!=3)return {};
+    for(unsigned c=0;c<2;++c)
+        if(result.uv[0][c]+result.uv[3][c]!=result.uv[1][c]+result.uv[2][c])return {};
+    return result;
+}
+bool blurCopyFootprint(const FlatPostQuad& quad,const BlurRect& known,unsigned width,unsigned height,unsigned scale) {
+    if(blurRectEmpty(known) || !width || !height || scale<2)return false;
+    // Evaluate a conservative rectangle containing every covered physical
+    // sample center. The 1/16 physical-pixel margin exceeds the projection
+    // uncertainty admitted above. Expand bounded [0,1] UVs separately for
+    // float interpolation, remap and normalized-coordinate arithmetic.
+    const double inset=.4375/scale;
+    const std::array<double,4> centers{quad.rectangle[0]+inset,quad.rectangle[1]+inset,
+                                     quad.rectangle[2]-inset,quad.rectangle[3]-inset};
+    std::array<double,2> low{INFINITY,INFINITY},high{-INFINITY,-INFINITY};
+    for(unsigned corner=0;corner<4;++corner) {
+        const double x=(centers[(corner&1)?2:0]-quad.screen[0])/(quad.screen[2]-quad.screen[0]);
+        const double y=(centers[(corner&2)?3:1]-quad.screen[1])/(quad.screen[3]-quad.screen[1]);
+        for(unsigned c=0;c<2;++c) {
+            const double uv=quad.uv[0][c]+x*(quad.uv[1][c]-quad.uv[0][c])+y*(quad.uv[2][c]-quad.uv[0][c]);
+            low[c]=(std::min)(low[c],uv);high[c]=(std::max)(high[c],uv);
+        }
+    }
+    for(unsigned c=0;c<2;++c) {
+        const double size=c?height:width;
+        constexpr double uvError=32*0x1p-23;
+        const double first=std::clamp(std::floor((low[c]-uvError)*size-.5),0.0,size-1);
+        const double last=std::clamp(std::ceil((high[c]+uvError)*size-.5),0.0,size-1);
+        if(first<known[c] || last>=known[c+2])return false;
+    }
+    return true;
+}
+
 double millisBetween(std::chrono::steady_clock::time_point begin,std::chrono::steady_clock::time_point end) {
     return std::chrono::duration<double,std::milli>(end-begin).count();
 }
@@ -224,7 +377,9 @@ bool WorldVertexShaderD3D11::bind(ID3D11DeviceContext* context,const Native::Wor
     }
     return true;
 }
-WorldRendererD3D11::WorldRendererD3D11(ID3D11Device* d,ID3D11DeviceContext* c,uint32_t scale):device_(d),context_(c),scale_(scale),transientBuffers_(d,c) {
+WorldRendererD3D11::WorldRendererD3D11(ID3D11Device* d,ID3D11DeviceContext* c,uint32_t scale,
+                                   const std::function<void()>& startup):device_(d),context_(c),scale_(scale),transientBuffers_(d,c) {
+    if (startup) startup();
     const char* reflectionProbe=std::getenv("DARK_REFLECTION_PROBE");
     reflectionProbe_=reflectionProbe && std::strcmp(reflectionProbe,"1")==0;
     if(reflectionProbe_)
@@ -259,8 +414,12 @@ WorldRendererD3D11::WorldRendererD3D11(ID3D11Device* d,ID3D11DeviceContext* c,ui
     // forms before the guest starts, just like the fragment programs below.
     // Keep the same shader objects for the first draw: no compile, cache I/O
     // or device shader/layout/buffer creation is needed on that display frame.
+    Native::StartupTrace::mark("world-vertex-prewarm.begin");
+    const bool traceStartup = Native::StartupTrace::enabled();
+    unsigned startupDescriptors = 0;
     const auto verticesStart=std::chrono::steady_clock::now();
     shaders_.reserve(engineWorldVertexDescriptorKeys.size()*3);
+    if (startup) startup();
     for(const auto& descriptorKey:engineWorldVertexDescriptorKeys) {
         std::array<uint8_t,80> descriptorBytes{};
         std::copy(descriptorKey.begin(),descriptorKey.end(),descriptorBytes.begin());
@@ -271,14 +430,23 @@ WorldRendererD3D11::WorldRendererD3D11(ID3D11Device* d,ID3D11DeviceContext* c,ui
             if(shader)continue;
             shader=std::make_unique<WorldVertexShaderD3D11>(device_.Get(),options,true,userClip);
             vertexShaderCompileCount_+=shader->compiled();
+            if (startup) startup();
         }
+        if (traceStartup && ++startupDescriptors % 32 == 0)
+            Native::StartupTrace::mark("world-vertex-prewarm.progress","32-descriptors",true);
     }
+    Native::StartupTrace::mark("world-vertex-prewarm.end");
     std::fprintf(stderr,"[RenderShaderCache] worldVS=%zu hits=%llu misses=%llu initMs=%.2f compiler=%016llX\n",
         shaders_.size(),uint64_t(shaders_.size())-vertexShaderCompileCount_,vertexShaderCompileCount_,
         millisBetween(verticesStart,std::chrono::steady_clock::now()),ShaderBytecodeCache::compilerIdentity().value_or(0));
+    Native::StartupTrace::mark("world-fragment-prewarm.begin");
     unsigned fragmentCacheHits=0,fragmentCacheMisses=0;
     const auto fragmentsStart=std::chrono::steady_clock::now();
     auto compile=[&](const char* source,const char* name,Ptr<ID3D11PixelShader>& shader) {
+        // One detail per preparation keeps all existing fragment names inside
+        // the budget. The next begin or batch end proves this call returned;
+        // a missing successor alone does not identify the blocked API.
+        Native::StartupTrace::mark("world-fragment-prepare.begin",name,true);
         Native::StallProfiler::Scope stallCompile(Native::StallProfiler::Section::Rendering,
                                                  "WorldRendererD3D11 fragment compile");
         Ptr<ID3DBlob> code,errors;
@@ -304,6 +472,22 @@ WorldRendererD3D11::WorldRendererD3D11(ID3D11Device* d,ID3D11DeviceContext* c,ui
         // then perform the fixed-function alpha comparison before blending.
         std::string nativeSource="#define pixelMain originalPixelMain\n";
         nativeSource+=source.source;
+        if(std::string_view(source.name)=="MRenderXenon_Attrib_TexEnvMode01")nativeSource+=R"(
+// A proven snapped blur contains constant physical blocks. Interpolate the
+// neighboring logical values with one bilinear fetch across their boundary.
+// Ordinary copies keep their original coordinates and sampler unchanged.
+cbuffer NativeBlurCopy : register(b3) {
+    float blurCopyInverseScale;uint blurCopyMask;uint2 blurCopySize;
+};
+float4 blurCopyPixelMain(Fragment input) {
+    if(blurCopyMask & 1u) {
+        float2 p=input.tex[0].xy*float2(blurCopySize)-0.5;
+        input.tex[0].xy=(floor(p)+1.0+(frac(p)-0.5)*blurCopyInverseScale)/float2(blurCopySize);
+    }
+    return originalPixelMain(input);
+}
+#define originalPixelMain blurCopyPixelMain
+)";
         const bool logicalBloom=std::string_view(source.name)=="XRUtil_ShrinkTexture8" ||
             std::string_view(source.name)=="XREngine_GaussClamped";
         if(logicalBloom)nativeSource+=R"(
@@ -358,7 +542,9 @@ float4 pixelMain(Fragment input) : SV_Target {
         if(captureMask!=source.textures || (program.textures&~captureMask))
             throw std::runtime_error("Native capture omits a compiled original texture binding");
         fragments_.emplace(std::string(source.name)+":"+std::to_string(source.flags),std::move(program));
+        if (startup) startup();
     }
+    Native::StartupTrace::mark("world-fragment-prewarm.end");
     std::fprintf(stderr,"[RenderShaderCache] fragments=%zu hits=%u misses=%u initMs=%.2f compiler=%016llX\n",
         std::size(worldFragmentSources),fragmentCacheHits,fragmentCacheMisses,
         millisBetween(fragmentsStart,std::chrono::steady_clock::now()),ShaderBytecodeCache::compilerIdentity().value_or(0));
@@ -376,6 +562,7 @@ float4 pixelMain(float4 p:SV_Position):SV_Target {
         D3DCOMPILE_ENABLE_STRICTNESS,0,&code,&errors),"resolve VS compilation");
     check(d->CreateVertexShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&transferVertex_),"resolve VS");
     compile(transferSource,"engine_resolve_copy",transferPixel_);
+    if (startup) startup();
     constexpr char logicalSource[]=R"(
 cbuffer Transfer : register(b0) {float4 area;float4 originScale;};
 Texture2D<float4> sourceImage:register(t0);
@@ -389,6 +576,7 @@ float4 pixelMain(float4 p:SV_Position):SV_Target {
     return total/(scale*scale);
 })";
     compile(logicalSource,"engine_bloom_logical",logicalPixel_);
+    if (startup) startup();
     D3D11_DEPTH_STENCIL_DESC depth{};depth.DepthFunc=D3D11_COMPARISON_ALWAYS;
     check(d->CreateDepthStencilState(&depth,&transferDepth_),"resolve depth state");
     D3D11_RASTERIZER_DESC raster{};raster.FillMode=D3D11_FILL_SOLID;raster.CullMode=D3D11_CULL_NONE;raster.DepthClipEnable=TRUE;
@@ -409,6 +597,7 @@ float4 pixelMain(float4 p:SV_Position):SV_Target {
     check(d->CreateSamplerState(&sampler,&wrapSampler_),"world wrap sampler");
     sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
     check(d->CreateSamplerState(&sampler,&cubeSampler_),"world cube sampler");
+    if (startup) startup();
 }
 void WorldRendererD3D11::requireResizeBoundary() const {
     if(activeHistogram_.source || inspectFrame_ || captureFrame_)
@@ -587,6 +776,20 @@ bool WorldRendererD3D11::setRenderScale(uint32_t scale) {
     surfaces_.swap(surfaces);resolved_.swap(resolved);scale_=scale;
     boundColor_=nullptr;boundDepth_=nullptr;boundViews_.fill(nullptr);
     return true;
+}
+void WorldRendererD3D11::configureTextureMods(const TextureMods::Config& config) {
+    if(textureMods_)throw std::logic_error("Texture packs are fixed for this run");
+    auto bounded=config;
+    bounded.gpuBytes=(std::min)(bounded.gpuBytes,imageBudget_/4);
+    textureMods_=TextureMods::makeWorker(device_.Get(),bounded);
+    if(textureMods_)std::fprintf(stderr,"[TextureMods] enabled pack=%ls dump=%ls cacheMiB=%zu\n",
+        bounded.packDirectory.c_str(),bounded.dumpDirectory.c_str(),bounded.gpuBytes/(1024*1024));
+}
+void WorldRendererD3D11::stopTextureMods() noexcept {
+    if(textureMods_ && !textureModsStopped_) {
+        textureMods_->stop(); textureModsStopped_=true;
+        std::fputs("[TextureMods] worker stopped and joined.\n",stderr);
+    }
 }
 bool WorldRendererD3D11::preloadImage(const std::shared_ptr<const ColorImage>& source) {
     Native::StallProfiler::Scope stallRender(Native::StallProfiler::Section::Rendering, "WorldRendererD3D11::preloadImage");
@@ -865,9 +1068,39 @@ bool WorldRendererD3D11::resolve(const Native::WorldResolve& r) {
     synchronizeSurface(src->second);
     transfer(src->second.view.Get(),r.destination.faces==6?dest.faces[r.face].Get():dest.color.Get(),copied,r.offset,std::exp2(float(r.exponent)));
     dest.logicalValid=false;
+    // A partial resolve can retain a disjoint blur region, but never infer that
+    // copied allocation fringe was produced by the Gaussian. An overlapping
+    // ordinary write discards the old proof before any new proof is installed.
+    const BlurRect written{r.offset[0],r.offset[1],r.offset[0]+copied[2]-copied[0],r.offset[1]+copied[3]-copied[1]};
+    invalidateBlurRect(dest.logicalBlurRegion,written);
+    if(!depth && r.destination.faces==1) {
+        auto known=blurRectIntersection(src->second.logicalBlurRegion,copied);
+        if(!blurRectEmpty(known)) {
+            for(unsigned c=0;c<2;++c) {
+                known[c]=known[c]-copied[c]+r.offset[c];
+                known[c+2]=known[c+2]-copied[c]+r.offset[c];
+            }
+            dest.logicalBlurRegion=known;
+        }
+    } else dest.logicalBlurRegion={};
     // Record the completed transfer before any separately recorded resolve
     // clears; the command order is the render consumer's actual execution.
     if(captureFrame_)Native::traceWorldResolve(r,inspection_,command,0,&copied);
+    // Retain the first two completed full-viewport HDR color copies at their
+    // actual write points, before a later resolve overwrites the same object.
+    // This is observational, explicit-inspection only, and shares the existing
+    // two-frame/128 MiB limits. A failed readback still consumes its attempt.
+    if(captureFrame_ && captureFullColorResolves_<2 && attachment==0 &&
+       r.destination.format==26 && r.destination.faces==1 &&
+       r.viewport[0]==0 && r.viewport[1]==0 &&
+       r.destination.width==r.viewport[2] && r.destination.height==r.viewport[3] &&
+       copied==std::array<uint32_t,4>{0,0,r.destination.width,r.destination.height} &&
+       r.offset==std::array<uint32_t,2>{0,0}) {
+        const unsigned pass=captureFullColorResolves_++;
+        // GPU records join the resolve command; ~0u means no associated draw.
+        captureTextureReadback(dest.texture.Get(),command,~0u,pass,
+            "full-color-resolve","resolved-color",r.destination.key(),0);
+    }
     if(captureFrame_ && otherWorldProbe_ && !depth) {
         if(otherWorldPhase_==1 && r.surfaceKey(attachment)==otherWorldSurface_) {
             otherWorldMask_=r.destination.key();otherWorldPhase_=2;
@@ -1033,6 +1266,8 @@ void WorldRendererD3D11::clear(const Native::WorldClear& c) {
         }
         if(rect.right<=rect.left || rect.bottom<=rect.top) {++emptyClearRegions_;return;}
         ++cleared;
+        if(!depth)invalidateBlurRect(target.logicalBlurRegion,
+            {uint32_t(rect.left),uint32_t(rect.top),uint32_t(rect.right),uint32_t(rect.bottom)});
         target.resolveDirty=target.stencilDirty=bool(target.multisample);
         if(rect.left==0 && rect.top==0 && rect.right==LONG(target.width) && rect.bottom==LONG(target.height)) {
             if(depth)context_->ClearDepthStencilView(target.depth.Get(),((c.flags&16)?D3D11_CLEAR_DEPTH:0)|((c.flags&32)?D3D11_CLEAR_STENCIL:0),std::clamp(c.depth,0.0f,1.0f),UINT8(c.stencil));
@@ -1096,6 +1331,8 @@ void WorldRendererD3D11::inspectNextFrame() {
     smokeRecords_=0;smokeTruncated_=false;smokeDrawOrdinal_=0;
     captureFrame_=inspection_<=2 && Native::worldCaptureEnabled();
     captureCommand_=captureShadowPasses_=captureReflectionPasses_=0;captureGpuBytes_=0;
+    captureFinalComposite_=false;
+    captureFullColorResolves_=0;
     otherWorldPhase_=otherWorldGrainDraw_=otherWorldCopyDraw_=0;
     otherWorldSurface_=otherWorldMask_=0;
     if(captureFrame_)Native::traceWorldFrame(inspection_,true,presentCount_,scale_);
@@ -1120,6 +1357,7 @@ void WorldRendererD3D11::captureTextureReadback(ID3D11Texture2D* texture,unsigne
         case DXGI_FORMAT_R8G8B8A8_UNORM:pixelBytes=4;encoding="RGBA8_UNORM";break;
         case DXGI_FORMAT_R16G16B16A16_UNORM:pixelBytes=8;encoding="RGBA16_UNORM-LE";break;
         case DXGI_FORMAT_R16G16B16A16_FLOAT:pixelBytes=8;encoding="RGBA16_FLOAT-LE";break;
+        case DXGI_FORMAT_R32G32B32A32_FLOAT:pixelBytes=16;encoding="RGBA32_FLOAT-LE";break;
         case DXGI_FORMAT_R32_FLOAT:pixelBytes=4;encoding="R32_FLOAT-LE";break;
         default:break;
     }
@@ -1161,6 +1399,45 @@ void WorldRendererD3D11::captureTextureReadback(ID3D11Texture2D* texture,unsigne
             Native::traceWorldGpu(inspection_,command,ordinal,pass,stage,role,key,slot,width,height,
                 unsigned(desc.Format),sub,row,encoding,pixels.data(),pixels.size());
         } catch(...) {omitted("readback-exception",sub,width,height,row);}
+    }
+}
+void WorldRendererD3D11::captureFinalCompositeDraw(const Native::WorldDraw& draw,unsigned command,unsigned ordinal,
+    bool after) noexcept {
+    if(!captureFrame_)return;
+    constexpr unsigned pass=0;
+    const std::string_view stage=after?"final5-after":"final5-before";
+    if(!after) {
+        // These are the resources and descriptors acquired by the context,
+        // including the logical bloom view, rather than guest requests.
+        std::array<ID3D11ShaderResourceView*,3> rawViews{};
+        std::array<ID3D11SamplerState*,3> rawSamplers{};
+        context_->PSGetShaderResources(0,3,rawViews.data());
+        context_->PSGetSamplers(0,3,rawSamplers.data());
+        constexpr std::string_view roles[]{"final5-scene","final5-bloom","final5-color-lookup"};
+        for(unsigned slot=0;slot<3;++slot) {
+            Ptr<ID3D11ShaderResourceView> view;view.Attach(rawViews[slot]);
+            Ptr<ID3D11SamplerState> sampler;sampler.Attach(rawSamplers[slot]);
+            Ptr<ID3D11Texture2D> texture;
+            if(view) {
+                D3D11_SHADER_RESOURCE_VIEW_DESC desc{};view->GetDesc(&desc);
+                Native::traceWorldGpu(inspection_,command,ordinal,pass,stage,"final5-srv-desc",0,slot,
+                    sizeof(desc)/4,1,0,0,sizeof(desc),"D3D11_SRV_DESC-LE",&desc,sizeof(desc));
+                Ptr<ID3D11Resource> resource;view->GetResource(&resource);resource.As(&texture);
+            }
+            if(sampler) {
+                D3D11_SAMPLER_DESC desc{};sampler->GetDesc(&desc);
+                Native::traceWorldGpu(inspection_,command,ordinal,pass,stage,"final5-sampler-desc",0,slot,
+                    sizeof(desc)/4,1,0,0,sizeof(desc),"D3D11_SAMPLER_DESC-LE",&desc,sizeof(desc));
+            }
+            captureTextureReadback(texture.Get(),command,ordinal,pass,stage,roles[slot],
+                draw.textureObjects[slot].key(),slot);
+        }
+    } else {
+        ID3D11RenderTargetView* rawTarget=nullptr;context_->OMGetRenderTargets(1,&rawTarget,nullptr);
+        Ptr<ID3D11RenderTargetView> view;view.Attach(rawTarget);
+        Ptr<ID3D11Texture2D> texture;
+        if(view) {Ptr<ID3D11Resource> resource;view->GetResource(&resource);resource.As(&texture);}
+        captureTextureReadback(texture.Get(),command,ordinal,pass,stage,"final5-target",draw.surfaceKey(0),0);
     }
 }
 void WorldRendererD3D11::captureReflectionDraw(const Native::WorldDraw& draw,unsigned command,unsigned ordinal,unsigned pass,
@@ -1575,6 +1852,11 @@ bool WorldRendererD3D11::draw(const Native::WorldDraw& draw) {
     static_assert(sizeof(colorLookup)==sizeof(uploadedColorLookup_));
     const std::string_view fragmentName=effectiveName;
     const bool bloomFilter=fragmentName=="XRUtil_ShrinkTexture8" || fragmentName=="XREngine_GaussClamped";
+    std::optional<FlatPostQuad> postQuad;bool postQuadChecked=false;
+    const auto checkedPostQuad=[&]() -> const FlatPostQuad* {
+        if(!postQuadChecked) {postQuad=flatPostQuad(draw,scale_);postQuadChecked=true;}
+        return postQuad?&*postQuad:nullptr;
+    };
     struct BloomControl {float renderScale;uint32_t snap;uint32_t padding[2];};
     BloomControl bloomControl{float(scale_),0,{0,0}};
     static_assert(sizeof(bloomControl)==sizeof(uploadedBloom_));
@@ -1609,6 +1891,7 @@ bool WorldRendererD3D11::draw(const Native::WorldDraw& draw) {
             continue;
         const bool cube=(frag->cubes&(1u<<slot))!=0;
         unsigned firstMip=0;
+        unsigned textureModMips=0;
         if(texture.object && resolved!=resolved_.end()) {
             if(cube!=(texture.faces==6) || texture.width!=resolved->second.width || texture.height!=resolved->second.height) return rejected(2);
             views[slot]=resolved->second.view.Get();
@@ -1661,6 +1944,24 @@ bool WorldRendererD3D11::draw(const Native::WorldDraw& draw) {
                             unsigned(draw.textures[slot]->promptOrigin));
                 }
             }
+            // Optional packs bind only owned ordinary surface images. Logical
+            // resources, shader constants, render targets, UI/video, prompts,
+            // subtitles, cubes and explicit partial-residency samplers retain
+            // their original interpretation. File/hash/GPU creation is owned
+            // by the worker; this lookup returns an original-path miss until ready.
+            const auto& authoredSampler=draw.samplers[slot];
+            if(textureMods_ && surfaceFiltering && draw.material!=Native::WorldMaterial::post &&
+               draw.material!=Native::WorldMaterial::fixed && !draw.subtitle && !cube && effective &&
+               !promptSubstituted && !subtitleSubstituted && authoredSampler.valid && authoredSampler.minLevel==0 &&
+               (authoredSampler.baseOnly || authoredSampler.maxLevel==0 || authoredSampler.maxLevel>=effective->mips.size())) {
+                if(auto replacement=textureMods_->request(effective);replacement.view) {
+                    views[slot]=replacement.view.Get(); retainedViews[slot]=replacement.view;
+                    textureModMips=replacement.mipLevels;
+                    static std::atomic<unsigned> modLogs{0};
+                    if(modLogs++<64)std::fprintf(stderr,"[TextureMods] bound slot=%u id=%u logical=%ux%u physical=%ux%u mips=%u\n",
+                        slot,draw.textureIds[slot],effective->width,effective->height,replacement.width,replacement.height,replacement.mipLevels);
+                }
+            }
             if(!effective || effective->faces!=(cube?6u:1u) || (!views[slot] && !(views[slot]=image(effective)))) {
                 static std::set<uint32_t> missing;
                 if(missing.size()<64 && missing.insert(draw.textureIds[slot]).second) std::fprintf(stderr,"[EngineWorldMissingTexture] program=%s slot=%u id=%u object=%08X storage=%08X format=%u size=%ux%u faces=%u\n",
@@ -1680,6 +1981,8 @@ bool WorldRendererD3D11::draw(const Native::WorldDraw& draw) {
         }
         if(!(texture.object && resolved!=resolved_.end()))firstMip=draw.textures[slot]->firstMip;
         auto captured=draw.samplers[slot];
+        if(textureModMips && !captured.baseOnly && captured.maxLevel>0)
+            captured.maxLevel=uint8_t(textureModMips-1);
         // These original filters cover logical texels, whereas a physical
         // bilinear fetch covers just two high-resolution pixels. In particular
         // ShrinkTexture8 otherwise leaves gaps between its sixteen taps.
@@ -1696,6 +1999,28 @@ bool WorldRendererD3D11::draw(const Native::WorldDraw& draw) {
            (texture.format==6 || texture.format==26 || texture.format==54)) {
             views[slot]=logicalBloomView(resolved->second);
             if(bloomFilter)bloomControl.snap=1;
+        }
+        if(scale_>1 && slot==0 && fragmentName=="MRenderXenon_Attrib_TexEnvMode01" &&
+           fragmentFlags==0 && draw.material==Native::WorldMaterial::fixed &&
+           texture.object && resolved!=resolved_.end() && !cube && texture.faces==1 &&
+           texture.mipLevels==1 && texture.firstMip==0 &&
+           captured.valid && captured.minLinear && captured.magLinear && captured.anisotropy==1 &&
+           captured.address[0]==2 && captured.address[1]==2 && captured.bias==0 &&
+           captured.minLevel==0 && (captured.maxLevel==0 || captured.baseOnly) &&
+           (texture.format==6 || texture.format==26 || texture.format==54) &&
+           !blurRectEmpty(resolved->second.logicalBlurRegion)) {
+            if(const auto* quad=checkedPostQuad();quad && blurCopyFootprint(*quad,
+               resolved->second.logicalBlurRegion,texture.width,texture.height,scale_)) {
+                colorLookup.logicalLookupMask|=1u;
+                colorLookup.padding[0]=texture.width;colorLookup.padding[1]=texture.height;
+                if(captureFrame_) {
+                    const auto& region=resolved->second.logicalBlurRegion;
+                    std::fprintf(stderr,"[LogicalBlurCopy] inspection=%u present=%llu command=%u draw=%u scale=%u key=%016llX size=%ux%u region=%u,%u,%u,%u\n",
+                        inspection_,static_cast<unsigned long long>(presentCount_),command,smokeOrdinal,scale_,
+                        static_cast<unsigned long long>(texture.key()),texture.width,texture.height,
+                        region[0],region[1],region[2],region[3]);
+                }
+            }
         }
         if(scale_>1 && spatialColorCubeCopy && slot==(fragmentFlags==2?0u:1u) &&
            draw.textures[slot] && draw.textures[slot]->width==324 && draw.textures[slot]->height==18) {
@@ -2151,14 +2476,42 @@ bool WorldRendererD3D11::draw(const Native::WorldDraw& draw) {
     const unsigned reflectionPass=captureReflection?captureReflectionPasses_++:0;
     if(captureReflection)captureReflectionDraw(draw,command,smokeOrdinal,reflectionPass,false);
     if(otherWorldPass)captureOtherWorldDraw(draw,command,smokeOrdinal,otherWorldPass,false);
+    // One final-composite readback per explicit inspected frame. Ordinary
+    // rendering never queries or copies these resources. All texture bytes
+    // share the existing 128 MiB cap and the native two-frame limit.
+    const bool captureFinal=captureFrame_ && !captureFinalComposite_ && draw.fragmentName=="XREngine_Final5";
+    if(captureFinal) {
+        captureFinalComposite_=true;
+        captureFinalCompositeDraw(draw,command,smokeOrdinal,false);
+    }
     // MSAA diagnostic readbacks may draw depth/stencil transfer helpers. Only
     // the native geometry belongs in this material's pipeline statistics.
     if(measure)context_->Begin(queries_[material].Get());
     context_->DrawIndexed(count,g.firstIndex,0);
     if(measure) {context_->End(queries_[material].Get());queryPending_[material]=true;queryOrdinals_[material]=ordinal;}
-    if(hasColor) {auto& output=surfaces_.at(draw.surfaceKey(0));output.resolveDirty=bool(output.multisample);}
+    if(hasColor) {
+        auto& output=surfaces_.at(draw.surfaceKey(0));output.resolveDirty=bool(output.multisample);
+        if(blend.RenderTarget[0].RenderTargetWriteMask &&
+           (!blurRectEmpty(output.logicalBlurRegion) || (fragmentName=="XREngine_GaussClamped" && bloomControl.snap))) {
+            // Prompt replacement can enlarge the rasterized quad. Its original
+            // geometry bounds are no longer a conservative write footprint.
+            const auto* quad=viewportValues[1][3]!=0?nullptr:checkedPostQuad();
+            BlurRect written=quad?quad->rectangle:BlurRect{draw.viewport[0],draw.viewport[1],
+                draw.viewport[0]+draw.viewport[2],draw.viewport[1]+draw.viewport[3]};
+            if(flags&0x20)written=blurRectIntersection(written,
+                {leftTop&65535,leftTop>>16,rightBottom&65535,rightBottom>>16});
+            invalidateBlurRect(output.logicalBlurRegion,written);
+            // Repeated logical cells require full color writes, an affine flat
+            // quad and no conditional coverage, blending, bias or user clipping.
+            if(quad && fragmentName=="XREngine_GaussClamped" && bloomControl.snap &&
+               !(flags&(1u|6u|8u|0x800u|0x4000u|0x40000u)) && a[97]==8 &&
+               blend.RenderTarget[0].RenderTargetWriteMask==15 && !blurRectEmpty(written))
+                output.logicalBlurRegion=written;
+        }
+    }
     if(depth) {auto& output=surfaces_.at(draw.surfaceKey(4));output.resolveDirty=output.stencilDirty=bool(output.multisample);}
     if(otherWorldPass)captureOtherWorldDraw(draw,command,smokeOrdinal,otherWorldPass,true);
+    if(captureFinal)captureFinalCompositeDraw(draw,command,smokeOrdinal,true);
     if(captureReflection)captureReflectionDraw(draw,command,smokeOrdinal,reflectionPass,true);
     if(captureProjector && shadowPass<8)captureShadow(draw,command,smokeOrdinal,shadowPass,true,views);
     if(captureFrame_)Native::traceWorldDrawResult(inspection_,command,smokeOrdinal,0,fragmentFlags,captureTextureMask,captureResolvedMask);

@@ -5,10 +5,12 @@
 #include "world_vertex_metadata.h"
 #include "world_constant_ranges.h"
 #include "msaa_depth_transfer.h"
+#include "texture_mods.h"
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <string_view>
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -57,6 +59,8 @@ class WorldRendererD3D11 {
     template<class T> using StringCache=std::unordered_map<std::string,T,StringHash,StringEqual>;
     Ptr<ID3D11Device> device_;
     Ptr<ID3D11DeviceContext> context_;
+    std::unique_ptr<TextureMods::Worker> textureMods_;
+    bool textureModsStopped_=false;
     uint32_t scale_;
     uint32_t subtitleRenderHeight_ = 0;
     struct FailedSubtitle { std::weak_ptr<const ColorImage> source; unsigned factor = 0; };
@@ -84,6 +88,9 @@ class WorldRendererD3D11 {
         Ptr<ID3D11ShaderResourceView> logicalView;
         Ptr<ID3D11RenderTargetView> logicalTarget;
         bool logicalValid=false;
+        // Only a completed, opaque snapped Gaussian establishes this region.
+        // Mixed atlas data and copied padding remain outside the proof.
+        std::array<uint32_t,4> logicalBlurRegion{};
     };
     std::unordered_map<const Native::StoredGeometry*,Geometry> geometry_;
     std::unordered_map<const Native::StoredGeometry*,Indices> indices_;
@@ -164,6 +171,8 @@ class WorldRendererD3D11 {
     bool smokeTruncated_=false;
     unsigned smokeDrawOrdinal_=0;
     bool captureFrame_=false;
+    bool captureFinalComposite_=false;
+    unsigned captureFullColorResolves_=0;
     unsigned captureCommand_=0,captureShadowPasses_=0,captureReflectionPasses_=0;
     size_t captureGpuBytes_=0;
     void captureShadow(const Native::WorldDraw&,unsigned command,unsigned ordinal,unsigned pass,bool after,
@@ -174,6 +183,8 @@ class WorldRendererD3D11 {
         bool after) noexcept;
     void captureTextureReadback(ID3D11Texture2D*,unsigned command,unsigned ordinal,unsigned pass,
         std::string_view stage,std::string_view role,uint64_t key,unsigned slot) noexcept;
+    void captureFinalCompositeDraw(const Native::WorldDraw&,unsigned command,unsigned ordinal,
+        bool after) noexcept;
     // Explicit issue42 diagnostics. Read once at construction; ordinary runs
     // never capture or bypass these original Other World passes.
     bool otherWorldProbe_=false,otherWorldBypass_=false;
@@ -255,7 +266,8 @@ class WorldRendererD3D11 {
     bool bloom_ = true;
     bool motionBlur_ = false;
 public:
-    WorldRendererD3D11(ID3D11Device*,ID3D11DeviceContext*,uint32_t scale=1);
+    WorldRendererD3D11(ID3D11Device*,ID3D11DeviceContext*,uint32_t scale=1,
+                       const std::function<void()>& startup = {});
     // Render-thread-only, between completed frames. Preserves retained GPU
     // contents and pending measurements; failed allocation leaves the old scale.
     bool setRenderScale(uint32_t scale);
@@ -277,6 +289,11 @@ public:
     // Render-thread-only optional upload of a complete authored image. Device
     // initialization leaves current immediate-context bindings unchanged.
     bool preloadImage(const std::shared_ptr<const ColorImage>&);
+    // Startup-only optional pack/dump configuration. Empty leaves the original
+    // path without a worker. Stop is explicit because normal process shutdown
+    // does not unwind the original guest's live workers.
+    void configureTextureMods(const TextureMods::Config&);
+    void stopTextureMods() noexcept;
     uint64_t imageUploadCount() const {return imageUploads_;}
     size_t vertexShaderCount() const {return shaders_.size();}
     uint64_t vertexShaderCompileCount() const {return vertexShaderCompileCount_;}

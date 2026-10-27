@@ -13,8 +13,17 @@
 #include <string>
 #include <string_view>
 #include "runtime/native/stall_profiler.h"
+#include "runtime/native/user_data_paths.h"
 
 namespace DarkRecomp::ShaderBytecodeCache {
+// Set once during native startup, before renderer workers or the first cache use.
+inline std::optional<std::filesystem::path> defaultDirectoryOverride;
+inline bool defaultDirectorySelected = false;
+inline void setDefaultDirectoryOverride(const std::filesystem::path& directory) {
+    if (defaultDirectorySelected) throw std::runtime_error("Shader cache directory already selected");
+    Native::requireOrdinaryUserDataPath(directory, Native::UserDataPathKind::Directory);
+    defaultDirectoryOverride = directory;
+}
 inline uint64_t hashBytes(const void* data,size_t size,uint64_t hash=14695981039346656037ull) noexcept {
     const auto* bytes=static_cast<const uint8_t*>(data);
     for(size_t i=0;i<size;++i) {hash^=bytes[i];hash*=1099511628211ull;}
@@ -77,8 +86,10 @@ class Cache {
     static constexpr std::array<char,8> magic{'D','R','S','B','C','0','2','\0'};
     static constexpr size_t limit=1024*1024;
     std::filesystem::path directory_;
+    bool ordinaryPaths_ = false;
 public:
-    explicit Cache(std::filesystem::path directory):directory_(std::move(directory)) {}
+    explicit Cache(std::filesystem::path directory, bool ordinaryPaths = false)
+        :directory_(std::move(directory)),ordinaryPaths_(ordinaryPaths) {}
     std::filesystem::path path(uint64_t key) const {
         char name[64]{};std::snprintf(name,sizeof(name),"native_v2_%016llX.cso",key);return directory_/name;
     }
@@ -88,6 +99,7 @@ public:
         try {
             if(directory_.empty())return false;
             const auto target=path(key);std::error_code status;
+            if (ordinaryPaths_ && !Native::ordinaryUserDataPath(target, Native::UserDataPathKind::File)) return false;
             const auto size=std::filesystem::file_size(target,status);
             if(status || size<=sizeof(Header) || size>sizeof(Header)+limit)return false;
             std::ifstream file(target,std::ios::binary);Header header{};
@@ -105,6 +117,8 @@ public:
                                             "ShaderBytecodeCache::save", 0, 0, key, "shader cache key");
         if(directory_.empty() || !code || !code->GetBufferSize() || code->GetBufferSize()>limit)return false;
         try {
+            if (ordinaryPaths_ && (!Native::ordinaryUserDataPath(directory_, Native::UserDataPathKind::Directory) ||
+                !Native::ordinaryUserDataPath(path(key), Native::UserDataPathKind::File))) return false;
             std::error_code status;std::filesystem::create_directories(directory_,status);if(status)return false;
             static std::atomic<uint64_t> sequence{};
             static const auto run=std::chrono::steady_clock::now().time_since_epoch().count();
@@ -132,6 +146,10 @@ public:
 };
 inline const Cache& defaultCache() {
     static const Cache cache([] {
+        defaultDirectorySelected = true;
+        // A private override is authoritative even when it cannot be written.
+        // Cache::save then fails there; shared installation/temp paths are never tried.
+        if (defaultDirectoryOverride) return *defaultDirectoryOverride;
         try {
             std::array<wchar_t,32768> executable{};
             const auto length=GetModuleFileNameW(nullptr,executable.data(),DWORD(executable.size()));
@@ -143,7 +161,7 @@ inline const Cache& defaultCache() {
             std::error_code status;std::filesystem::create_directories(directory,status);if(!status)return directory;
         } catch(...) {}
         return std::filesystem::path{};
-    }());
+    }(), defaultDirectoryOverride.has_value());
     return cache;
 }
 }

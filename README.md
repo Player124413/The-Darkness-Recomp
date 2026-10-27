@@ -108,6 +108,19 @@ retarget them automatically.
 
 ## Steam Deck and Linux
 
+For releases that provide a `The-Darkness-Recomp-vX.Y.Z-steam-deck-x86_64.AppImage`
+asset, download it from [Releases](https://github.com/portingpete/The-Darkness-Recomp/releases)
+in Steam Deck Desktop Mode. Mark it executable in Dolphin's **Properties >
+Permissions**, then open it to select your own extracted game dump and a parent
+folder for installation. The wizard creates `The-Darkness-Recomp` there and
+installs the Windows release with verified UMU and GE-Proton downloads.
+It requires Python 3.10+, KDialog or Zenity, internet access, and room for another
+copy of the game and Proton on a Linux filesystem, such as an ext4 SD card.
+Setup finishes without starting the game. Open `Play-The-Darkness.desktop` in
+the chosen installation folder to play in Desktop Mode; see
+[the AppImage instructions](STEAM_DECK.md#appimage-installer-in-desktop-mode)
+for Steam shortcuts, updates, and the FUSE fallback.
+
 The Windows build can run through Proton on Linux. `Launch.sh` and the file I/O
 compatibility fixes were tested with GE-Proton11-7 in Ubuntu 24.04 under WSL2.
 The opening level rendered with audio and created checkpoint saves; memory,
@@ -222,6 +235,9 @@ guide, **F2** toggle capture, **Esc** release).
 - [CONTROLS.md](CONTROLS.md) — every binding, launcher option, and setting
 - [RENDERING.md](RENDERING.md) — how the renderer and frame pacing work
 - [STEAM_DECK.md](STEAM_DECK.md) — Proton setup, validation scope and diagnostics
+- [XWC audio tool](tools/xwc_audio/README.md) — read-only bank inspection, original XMA export and header timing diagnostics
+- [DDS texture tool](tools/texture_mods/README.md) — RGBA8 DDS helper and experimental world texture packs; one 2x wall replacement verified in-game
+- [Video pack tool](tools/video_mods/README.md) — imports timed WMV3/Theora replacements for the optional read-only video loader; playback qualification is in progress
 
 ## Updating a downloaded release
 
@@ -281,6 +297,12 @@ runtime dependencies, notices, and audio-library source. Diagnostic launchers
 are only in the separate ZIP, with instructions for extracting it beside
 `Launch.cmd`. Game dumps, saves, settings, build tools, and diagnostic logs
 are excluded from both packages.
+
+To package the Steam Deck installer on Linux from that Windows ZIP, see
+[the AppImage packaging instructions](STEAM_DECK.md#build-the-installer-appimage-maintainers).
+The packager validates the release manifest and hashes, bundles the current
+setup engine with the released Windows payload, and uses locally supplied
+AppImage tools.
 
 ## Tests
 

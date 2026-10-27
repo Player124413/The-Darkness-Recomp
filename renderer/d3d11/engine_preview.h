@@ -7,6 +7,7 @@
 #include <dxgi.h>
 #include <wrl/client.h>
 #include <filesystem>
+#include <functional>
 #include <unordered_map>
 
 namespace DarkRecomp {
@@ -69,7 +70,8 @@ public:
     // Output dimensions are physical pixels; scale applies to guest world commands.
     EnginePreviewD3D11(ID3D11Device*, ID3D11DeviceContext*, IDXGISwapChain*,
                        uint32_t renderWidth = 0, uint32_t renderHeight = 0, uint32_t scale = 1,
-                       bool highPrecisionDisplay = false, bool stretchToFill = false);
+                       bool highPrecisionDisplay = false, bool stretchToFill = false,
+                       const std::function<void()>& startup = {});
     // Window-thread-only, after the last part of a frame. Logical guest extents
     // must stay fixed; all old targets remain usable if preparing a resize fails.
     bool resizeRenderTarget(uint32_t width,uint32_t height,uint32_t scale);
@@ -87,6 +89,8 @@ public:
     size_t textureBudget() const {return world_->textureBudget();}
     // Between complete frames only; optional preloading cannot change bindings.
     bool preloadImage(const std::shared_ptr<const ColorImage>& image);
+    void configureTextureMods(const TextureMods::Config&);
+    void stopTextureMods() noexcept {if(world_)world_->stopTextureMods();}
     uint32_t readPixel(uint32_t x, uint32_t y);
     void saveBmp(const std::filesystem::path& path);
     // Optional F8 evidence must not terminate gameplay or replace an existing capture.
