@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -85,8 +86,11 @@ class AppImageTests(unittest.TestCase):
                       (destination / 'AppRun').read_bytes())
         self.assertNotIn(b'\r\n', (destination / 'AppRun').read_bytes())
         self.assertIn('Terminal=false', (destination / 'darkrecomp-installer.desktop').read_text())
-        self.assertEqual((destination / '.DirIcon').read_bytes(),
-                         (destination / 'darkrecomp-installer.svg').read_bytes())
+        icon = (destination / '.DirIcon').read_bytes()
+        self.assertEqual(icon[:8], b'\x89PNG\r\n\x1a\n')
+        self.assertEqual(icon[12:16], b'IHDR')
+        self.assertEqual((int.from_bytes(icon[16:20], 'big'),
+                          int.from_bytes(icon[20:24], 'big')), (256, 256))
         self.assertEqual(sorted(path.name for path in (release / 'Darkness').iterdir()),
                          ['PUT_GAME_FILES_HERE.txt'])
         if os.name != 'nt':
@@ -253,6 +257,8 @@ class AppImageTests(unittest.TestCase):
             result = appimage.package(self.archive, self.output, self.tool, self.runtime, self.installer)
         self.assertEqual(invoked.call_count, 1)
         self.assertEqual(result.name, 'The-Darkness-Recomp-v1.2.3-steam-deck-x86_64.AppImage')
+        if os.name == 'posix':
+            self.assertEqual(stat.S_IMODE(result.stat().st_mode), 0o755)
         self.assertEqual(result.with_suffix('.AppImage.sha256').read_text(),
                          f'{hashlib.sha256(result.read_bytes()).hexdigest()}  {result.name}\n')
 
@@ -262,18 +268,229 @@ class AppImageTests(unittest.TestCase):
                 appimage.package(self.archive, self.output, self.tool, self.runtime, self.installer)
         self.assertEqual(list(self.output.iterdir()), [])
 
-    def test_existing_release_or_checksum_is_preserved_without_running_tools(self):
+    def test_interrupted_image_copy_cleans_staging_and_retry_succeeds(self):
+        expected = elf() + b'AppImage fixture'
+
+        def fake_appimagetool(command, *, cwd, env, check):
+            Path(command[-1]).write_bytes(expected)
+
+        real_copy = shutil.copyfileobj
+        interrupted = False
+
+        def copy_with_interruption(source, destination, *args, **kwargs):
+            nonlocal interrupted
+            if Path(destination.name).name.endswith('.AppImage') and not interrupted:
+                destination.write(b'partial image')
+                interrupted = True
+                raise OSError('injected copy interruption')
+            return real_copy(source, destination, *args, **kwargs)
+
+        with patch.object(appimage.subprocess, 'run', side_effect=fake_appimagetool):
+            with patch.object(appimage.shutil, 'copyfileobj', side_effect=copy_with_interruption):
+                with self.assertRaisesRegex(OSError, 'injected copy interruption'):
+                    appimage.package(self.archive, self.output, self.tool, self.runtime, self.installer)
+            self.assertEqual(list(self.output.iterdir()), [], 'failed copy must leave no final or staging files')
+            result = appimage.package(self.archive, self.output, self.tool, self.runtime, self.installer)
+
+        self.assertEqual(result.read_bytes(), expected)
+        self.assertEqual(result.with_suffix('.AppImage.sha256').read_text(),
+                         f'{hashlib.sha256(expected).hexdigest()}  {result.name}\n')
+
+    def test_abrupt_exit_after_image_publication_retries_to_complete_pair(self):
+        expected = elf() + b'AppImage fixture'
+        module_path = Path(appimage.__file__).resolve()
+        image = self.output / 'The-Darkness-Recomp-v1.2.3-steam-deck-x86_64.AppImage'
+        child = r'''
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location('package_appimage_child', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+expected = bytes.fromhex(sys.argv[8])
+
+def fake_appimagetool(command, *, cwd, env, check):
+    Path(command[-1]).write_bytes(expected)
+
+real_link = os.link
+image = Path(sys.argv[7])
+
+def exit_after_image_link(source, destination):
+    real_link(source, destination)
+    if Path(destination) == image:
+        os._exit(73)
+
+module.subprocess.run = fake_appimagetool
+module.os.link = exit_after_image_link
+module.package(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]),
+               Path(sys.argv[5]), Path(sys.argv[6]))
+'''
+        child_env = os.environ | {'TMP': str(self.root), 'TEMP': str(self.root), 'TMPDIR': str(self.root)}
+        terminated = subprocess.run(
+            [sys.executable, '-c', child, str(module_path), str(self.archive), str(self.output),
+             str(self.tool), str(self.runtime), str(self.installer), str(image), expected.hex()],
+            cwd=self.root, env=child_env, capture_output=True, timeout=30, check=False)
+
+        self.assertEqual(terminated.returncode, 73, terminated.stderr.decode(errors='replace'))
+        checksum = image.with_suffix('.AppImage.sha256')
+        self.assertEqual(image.read_bytes(), expected)
+        self.assertFalse(checksum.exists())
+        self.assertTrue(list(self.output.glob('.darkrecomp-appimage-*')),
+                        'os._exit may leave private staging, which must not block retry')
+
+        def fake_appimagetool(command, *, cwd, env, check):
+            Path(command[-1]).write_bytes(expected)
+
+        with patch.object(appimage.subprocess, 'run', side_effect=fake_appimagetool):
+            result = appimage.package(self.archive, self.output, self.tool, self.runtime, self.installer)
+
+        self.assertEqual(result.read_bytes(), expected)
+        self.assertEqual(checksum.read_text(),
+                         f'{hashlib.sha256(expected).hexdigest()}  {image.name}\n')
+
+    def test_matching_image_orphan_is_reused_and_checksum_completed(self):
+        self.output.mkdir()
+        expected = elf() + b'AppImage fixture'
+        image = self.output / 'The-Darkness-Recomp-v1.2.3-steam-deck-x86_64.AppImage'
+        image.write_bytes(expected)
+        image.chmod(0o755)
+
+        def fake_appimagetool(command, *, cwd, env, check):
+            Path(command[-1]).write_bytes(expected)
+
+        with patch.object(appimage.subprocess, 'run', side_effect=fake_appimagetool):
+            result = appimage.package(self.archive, self.output, self.tool, self.runtime, self.installer)
+
+        self.assertEqual(result.read_bytes(), expected)
+        self.assertEqual(result.with_suffix('.AppImage.sha256').read_text(),
+                         f'{hashlib.sha256(expected).hexdigest()}  {image.name}\n')
+
+    def test_posix_executable_predicate_checks_current_user_access(self):
+        image = self.root / 'candidate.AppImage'
+        with patch.object(appimage.os, 'access', return_value=False) as access:
+            self.assertFalse(appimage._is_executable_by_current_user(image, posix=True))
+            access.assert_called_once_with(image, appimage.os.X_OK)
+        with patch.object(appimage.os, 'access', return_value=True) as access:
+            self.assertTrue(appimage._is_executable_by_current_user(image, posix=True))
+            access.assert_called_once_with(image, appimage.os.X_OK)
+
+    def test_non_executable_matching_image_is_preserved_and_rejected(self):
+        self.output.mkdir()
+        expected = elf() + b'AppImage fixture'
+        image = self.output / 'The-Darkness-Recomp-v1.2.3-steam-deck-x86_64.AppImage'
+        image.write_bytes(expected)
+        image.chmod(0o644)
+
+        def fake_appimagetool(command, *, cwd, env, check):
+            Path(command[-1]).write_bytes(expected)
+
+        # Force the POSIX access result so this integration check is meaningful
+        # on Windows test hosts as well as on Linux.
+        with patch.object(appimage, '_is_executable_by_current_user', return_value=False) as executable:
+            with patch.object(appimage.subprocess, 'run', side_effect=fake_appimagetool):
+                with self.assertRaisesRegex(FileExistsError, 'conflicting existing output'):
+                    appimage.package(self.archive, self.output, self.tool, self.runtime, self.installer)
+
+        executable.assert_called_once_with(image)
+        self.assertEqual(image.read_bytes(), expected)
+        self.assertFalse(image.with_suffix('.AppImage.sha256').exists())
+
+    def test_matching_checksum_orphan_is_preserved_and_image_completed(self):
+        self.output.mkdir()
+        expected = elf() + b'AppImage fixture'
+        image = self.output / 'The-Darkness-Recomp-v1.2.3-steam-deck-x86_64.AppImage'
+        checksum = image.with_suffix('.AppImage.sha256')
+        expected_checksum = f'{hashlib.sha256(expected).hexdigest()}  {image.name}\n'
+        checksum.write_bytes(expected_checksum.encode('ascii'))
+
+        def fake_appimagetool(command, *, cwd, env, check):
+            Path(command[-1]).write_bytes(expected)
+
+        with patch.object(appimage.subprocess, 'run', side_effect=fake_appimagetool):
+            result = appimage.package(self.archive, self.output, self.tool, self.runtime, self.installer)
+
+        self.assertEqual(result.read_bytes(), expected)
+        self.assertEqual(checksum.read_text(), expected_checksum)
+
+    def test_nonmatching_image_or_checksum_is_preserved_without_partial_partner(self):
         self.output.mkdir()
         image = self.output / 'The-Darkness-Recomp-v1.2.3-steam-deck-x86_64.AppImage'
+        checksum = image.with_suffix('.AppImage.sha256')
         for existing in (image, image.with_suffix('.AppImage.sha256')):
             with self.subTest(existing=existing):
                 existing.write_bytes(b'previous release')
-                with patch.object(appimage.subprocess, 'run') as run:
+                def fake_appimagetool(command, *, cwd, env, check):
+                    Path(command[-1]).write_bytes(elf() + b'AppImage fixture')
+
+                with patch.object(appimage.subprocess, 'run', side_effect=fake_appimagetool):
                     with self.assertRaises(FileExistsError):
                         appimage.package(self.archive, self.output, self.tool, self.runtime, self.installer)
-                    run.assert_not_called()
                 self.assertEqual(existing.read_bytes(), b'previous release')
+                self.assertEqual([path.name for path in self.output.iterdir()], [existing.name])
                 existing.unlink()
+
+    def test_replacement_after_image_link_is_never_deleted_on_later_failure(self):
+        expected = elf() + b'AppImage fixture'
+        image = self.output / 'The-Darkness-Recomp-v1.2.3-steam-deck-x86_64.AppImage'
+        checksum = image.with_suffix('.AppImage.sha256')
+        real_link = appimage.os.link
+        foreign = b'concurrent replacement'
+
+        def fake_appimagetool(command, *, cwd, env, check):
+            Path(command[-1]).write_bytes(expected)
+
+        def replace_then_fail_checksum(source, destination):
+            if Path(destination) == image:
+                real_link(source, destination)
+                Path(destination).unlink()
+                Path(destination).write_bytes(foreign)
+                return
+            if Path(destination) == checksum:
+                raise OSError('injected checksum publication failure')
+            return real_link(source, destination)
+
+        with patch.object(appimage.subprocess, 'run', side_effect=fake_appimagetool):
+            with patch.object(appimage.os, 'link', side_effect=replace_then_fail_checksum):
+                with self.assertRaisesRegex(appimage.PackageError, 'hard-link'):
+                    appimage.package(self.archive, self.output, self.tool, self.runtime, self.installer)
+
+        self.assertEqual(image.read_bytes(), foreign)
+        self.assertFalse(checksum.exists())
+
+    def test_output_symlinks_are_rejected_and_preserved(self):
+        self.output.mkdir()
+        target = self.root / 'foreign target'
+        target.write_bytes(b'foreign output')
+        image = self.output / 'The-Darkness-Recomp-v1.2.3-steam-deck-x86_64.AppImage'
+        for destination in (image, image.with_suffix('.AppImage.sha256')):
+            try:
+                destination.symlink_to(target)
+            except (OSError, NotImplementedError) as error:
+                self.skipTest(f'host cannot create symlinks: {error}')
+            with self.subTest(destination=destination):
+                def fake_appimagetool(command, *, cwd, env, check):
+                    Path(command[-1]).write_bytes(elf() + b'AppImage fixture')
+
+                with patch.object(appimage.subprocess, 'run', side_effect=fake_appimagetool):
+                    with self.assertRaisesRegex(appimage.PackageError, 'non-regular'):
+                        appimage.package(self.archive, self.output, self.tool, self.runtime, self.installer)
+                self.assertTrue(destination.is_symlink())
+                destination.unlink()
+
+    def test_hardlink_publication_limitation_fails_without_outputs(self):
+        expected = elf() + b'AppImage fixture'
+
+        def fake_appimagetool(command, *, cwd, env, check):
+            Path(command[-1]).write_bytes(expected)
+
+        with patch.object(appimage.subprocess, 'run', side_effect=fake_appimagetool):
+            with patch.object(appimage.os, 'link', side_effect=OSError('hard links unsupported')):
+                with self.assertRaisesRegex(appimage.PackageError, 'hard-link support'):
+                    appimage.package(self.archive, self.output, self.tool, self.runtime, self.installer)
+
+        self.assertEqual(list(self.output.iterdir()), [])
 
     def test_cli_requires_explicit_tool_and_runtime_without_downloading(self):
         with patch.object(appimage.subprocess, 'run') as run:

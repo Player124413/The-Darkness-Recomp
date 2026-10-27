@@ -12,4 +12,13 @@ inline DisplayRect fitDisplay(uint32_t imageWidth, uint32_t imageHeight,
     const float width = imageWidth * scale, height = imageHeight * scale;
     return {(outputWidth - width) * .5f, (outputHeight - height) * .5f, width, height};
 }
+inline DisplayRect presentationRect(uint32_t imageWidth, uint32_t imageHeight,
+                                    uint32_t outputWidth, uint32_t outputHeight,
+                                    bool stretchToFill = false) {
+    if (stretchToFill) {
+        if (!imageWidth || !imageHeight || !outputWidth || !outputHeight) return {};
+        return {0, 0, float(outputWidth), float(outputHeight)};
+    }
+    return fitDisplay(imageWidth, imageHeight, outputWidth, outputHeight);
+}
 }

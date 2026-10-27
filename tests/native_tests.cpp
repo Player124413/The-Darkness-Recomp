@@ -29,6 +29,7 @@ static void check(bool success, const char* message) { if (!success) throw std::
 #include "native_timed_wait_tests.h"
 #include "native_format_tests.h"
 #include "file_buffer_tests.h"
+#include "video_mod_guest_tests.h"
 #include "audio_buffer_tests.h"
 #include "audio_output_headroom_tests.h"
 #include "audio_resampler_tests.h"
@@ -1663,11 +1664,25 @@ static void testFiles(PPCContext& ctx, uint32_t scratch) {
 int main(int argc, char** argv) {
     try {
         check(argc >= 2, "Game directory required");
+        const bool videoFileTest = argc == 4 && strcmp(argv[2], "--video-mod-files") == 0;
+        std::filesystem::path videoTestUserData;
+        if (videoFileTest) {
+            wchar_t temporary[MAX_PATH]{};
+            check(GetTempPathW(MAX_PATH, temporary) != 0, "Video test temp directory unavailable");
+            videoTestUserData = std::filesystem::path(temporary) /
+                (L"DarkVideoGuest-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+            check(std::filesystem::create_directory(videoTestUserData), "New video test user-data directory required");
+            std::printf("[VideoModTest] Isolated user data: %ls\n", videoTestUserData.c_str());
+        }
         Memory addressSpace;
         memory = &addressSpace;
-        addressSpace.load(argv[1]);
+        addressSpace.load(argv[1], videoTestUserData);
         PPCContext ctx{};
         addressSpace.initThread(ctx);
+        if (videoFileTest) {
+            testVideoModGuest(ctx, argv[3]);
+            return 0;
+        }
         if (argc == 3 && strcmp(argv[2], "--revision-glyphs") == 0) {
             testRevisionGlyphs(ctx);
             return 0;

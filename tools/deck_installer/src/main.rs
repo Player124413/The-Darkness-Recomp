@@ -81,7 +81,34 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Options> {
 fn program(name: &str) -> Option<PathBuf> {
     env::split_paths(&env::var_os("PATH").unwrap_or_default())
         .map(|path| path.join(name))
-        .find(|path| path.is_file())
+        .find(|path| executable(path))
+}
+
+fn executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::raw::{c_char, c_int};
+        use std::os::unix::ffi::OsStrExt;
+        extern "C" {
+            fn access(path: *const c_char, mode: c_int) -> c_int;
+        }
+        let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // This unprivileged installer must skip PATH entries its user cannot
+        // execute, including ACL restrictions. X_OK is 1 on POSIX systems.
+        // SAFETY: CString owns a live, NUL-terminated path for the entire call;
+        // access only reads it and does not retain the pointer.
+        unsafe { access(path.as_ptr(), 1) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 #[derive(Clone, Debug)]

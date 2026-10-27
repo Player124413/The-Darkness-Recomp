@@ -1001,6 +1001,9 @@ static void immediateCanonicalContract(WorldRendererD3D11& renderer) {
 #include "world_color_lookup_tests.h"
 #include "world_gui_fade_tests.h"
 #include "bloom_resolution_tests.h"
+#include "world_post_copy_filter_tests.h"
+#include "world_final_capture_tests.h"
+#include "world_full_color_capture_tests.h"
 #include "darkness_arm_bloom_tests.h"
 #include "flare_visibility_tests.h"
 #include "world_resolve_fringe_tests.h"
@@ -1822,7 +1825,7 @@ static void worldRendererDebugContract(ID3D11Device* device) {
 int main(int argc,char** argv) {
     ComPtr<ID3D11Device> device;
     try {
-        bool warp=false,cpuOnly=false,colorGradeOnly=false,guiFadeOnly=false,resolutionSwitchOnly=false,frontbufferOnly=false,clipPlanesOnly=false,bloomOnly=false,armBloomOnly=false,textureBudgetOnly=false,subtitleFontOnly=false;
+        bool warp=false,cpuOnly=false,colorGradeOnly=false,guiFadeOnly=false,resolutionSwitchOnly=false,frontbufferOnly=false,clipPlanesOnly=false,bloomOnly=false,postCopyOnly=false,finalCaptureOnly=false,armBloomOnly=false,textureBudgetOnly=false,subtitleFontOnly=false;
         for(int i=1;i<argc;++i) {
             if(std::strcmp(argv[i],"--warp")==0)warp=true;
             else if(std::strcmp(argv[i],"--cpu-only")==0)cpuOnly=true;
@@ -1832,14 +1835,16 @@ int main(int argc,char** argv) {
             else if(std::strcmp(argv[i],"--frontbuffer-only")==0)frontbufferOnly=true;
             else if(std::strcmp(argv[i],"--clip-planes-only")==0)clipPlanesOnly=true;
             else if(std::strcmp(argv[i],"--bloom-only")==0)bloomOnly=true;
+            else if(std::strcmp(argv[i],"--post-copy-only")==0)postCopyOnly=true;
+            else if(std::strcmp(argv[i],"--final-capture-only")==0)finalCaptureOnly=true;
             else if(std::strcmp(argv[i],"--arm-bloom-only")==0)armBloomOnly=true;
             else if(std::strcmp(argv[i],"--texture-budget-only")==0)textureBudgetOnly=true;
             else if(std::strcmp(argv[i],"--subtitle-font-only")==0)subtitleFontOnly=true;
-            else throw std::runtime_error("Unknown argument; expected --warp, --cpu-only, --color-grade-only, --gui-fade-only, --resolution-switch-only, --frontbuffer-only, --clip-planes-only, --bloom-only, --arm-bloom-only, --texture-budget-only or --subtitle-font-only");
+            else throw std::runtime_error("Unknown argument; expected --warp, --cpu-only, --color-grade-only, --gui-fade-only, --resolution-switch-only, --frontbuffer-only, --clip-planes-only, --bloom-only, --post-copy-only, --final-capture-only, --arm-bloom-only, --texture-budget-only or --subtitle-font-only");
         }
-        require(unsigned(cpuOnly)+unsigned(colorGradeOnly)+unsigned(guiFadeOnly)+unsigned(resolutionSwitchOnly)+unsigned(frontbufferOnly)+unsigned(clipPlanesOnly)+unsigned(bloomOnly)+unsigned(armBloomOnly)+unsigned(textureBudgetOnly)+unsigned(subtitleFontOnly)<=1,
+        require(unsigned(cpuOnly)+unsigned(colorGradeOnly)+unsigned(guiFadeOnly)+unsigned(resolutionSwitchOnly)+unsigned(frontbufferOnly)+unsigned(clipPlanesOnly)+unsigned(bloomOnly)+unsigned(postCopyOnly)+unsigned(finalCaptureOnly)+unsigned(armBloomOnly)+unsigned(textureBudgetOnly)+unsigned(subtitleFontOnly)<=1,
             "Focused contract modes are mutually exclusive");
-        if(!colorGradeOnly && !guiFadeOnly && !resolutionSwitchOnly && !frontbufferOnly && !clipPlanesOnly && !bloomOnly && !armBloomOnly && !textureBudgetOnly && !subtitleFontOnly) {
+        if(!colorGradeOnly && !guiFadeOnly && !resolutionSwitchOnly && !frontbufferOnly && !clipPlanesOnly && !bloomOnly && !postCopyOnly && !finalCaptureOnly && !armBloomOnly && !textureBudgetOnly && !subtitleFontOnly) {
             constantCopyContract();lightingValidationContract();promptWorldContract();
             formats();paletteUsageContract();paletteArithmeticContract();worldPositionUsageContract();worldWaterUsageContract();worldShadowInputContract();
             worldVertexValidationContract();immediateIndexOwnershipContract();
@@ -1851,6 +1856,17 @@ int main(int argc,char** argv) {
         ComPtr<ID3D11DeviceContext> context;const D3D_FEATURE_LEVEL level=D3D_FEATURE_LEVEL_11_0;
         const auto deviceFlags=GetEnvironmentVariableA("DARK_D3D_DEBUG",nullptr,0)?D3D11_CREATE_DEVICE_DEBUG:0;
         check(D3D11CreateDevice(nullptr,warp?D3D_DRIVER_TYPE_WARP:D3D_DRIVER_TYPE_HARDWARE,nullptr,deviceFlags,&level,1,D3D11_SDK_VERSION,&device,nullptr,&context),"D3D device");
+        if(postCopyOnly) {
+            postCopyFilterContract(device.Get(),context.Get());
+            worldRendererDebugContract(device.Get());context->ClearState();
+            std::printf("WorldPostCopyFilterContract passed: %s.\n",warp?"WARP":"hardware");return 0;
+        }
+        if(finalCaptureOnly) {
+            finalCompositeCaptureContract(device.Get(),context.Get());
+            fullColorResolveCaptureContract(device.Get(),context.Get());
+            worldRendererDebugContract(device.Get());context->ClearState();
+            std::printf("WorldFinalCaptureContract PASS: %s.\n",warp?"WARP":"hardware");return 0;
+        }
         if(subtitleFontOnly) {
             subtitleFontContract(device.Get(),context.Get());
             worldRendererDebugContract(device.Get());context->ClearState();

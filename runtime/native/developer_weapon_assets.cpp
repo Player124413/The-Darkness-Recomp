@@ -1,4 +1,5 @@
 #include "developer_weapon_assets.h"
+#include "user_data_paths.h"
 #include "runtime.h"
 #include "objects.h"
 #include "ppc_recomp_shared.h"
@@ -663,7 +664,8 @@ std::vector<File> parseArchive(std::span<const uint8_t> archive, std::span<const
 }
 
 DeveloperWeaponAssets prepareDeveloperWeaponAssets(PPCContext& ctx, uint8_t* base,
-    const std::filesystem::path& gameDirectory) {
+    const std::filesystem::path& gameDirectory, const std::filesystem::path& cacheDirectory) {
+    const auto cacheRoot = userDataCacheDirectory(gameDirectory, cacheDirectory, L"build_native/run/developer-weapons");
     std::map<std::string, File> files;
     SourceHash sourceHash;
     sourceHash.add("DarkRecomp developer weapon cached reads and matched streamed mips v2\n");
@@ -698,10 +700,11 @@ DeveloperWeaponAssets prepareDeveloperWeaponAssets(PPCContext& ctx, uint8_t* bas
             invalid("Developer weapon texture reads are missing from the donor archives.");
     }
     materializeStreamedMips(files, gameDirectory, sourceHash);
-    const auto directory = gameDirectory.parent_path() / L"build_native/run/developer-weapons" / sourceHash.finish();
+    const auto directory = cacheRoot / sourceHash.finish();
     DeveloperWeaponAssets result;
     for (const auto& [name, file] : files) {
         const auto path = directory / std::filesystem::path(name);
+        if (!cacheDirectory.empty()) requireOrdinaryUserDataPath(path, UserDataPathKind::File);
         store(path, file);
         auto prepared = std::make_shared<CachedWeaponFile>();
         prepared->path = path; prepared->size = file.size;

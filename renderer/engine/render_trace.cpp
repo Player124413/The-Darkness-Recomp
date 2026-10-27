@@ -347,7 +347,7 @@ void capture(uint32_t function, uint64_t call, PPCContext& ctx, uint8_t* base) n
     }
 }
 
-void captureVideo(uint64_t call, uint8_t* base, uint32_t container, uint32_t localId,
+void captureVideo(uint32_t function, uint64_t call, uint8_t* base, uint32_t container, uint32_t localId,
                   uint32_t request, uint32_t caller) noexcept {
     if (!enabled.load(std::memory_order_relaxed) || (call > 4 && (call & (call - 1)))) return;
     try {
@@ -355,7 +355,7 @@ void captureVideo(uint64_t call, uint8_t* base, uint32_t container, uint32_t loc
         if (!enabled || writtenBytes >= maxBytes) return;
         ++sequence;
         std::ostringstream line;
-        line << "{\"sequence\":" << sequence << ",\"function\":" << 0x8279DDC0u
+        line << "{\"sequence\":" << sequence << ",\"function\":" << function
              << ",\"call\":" << call << ",\"ms\":" << (GetTickCount64() - epoch)
              << ",\"lr\":" << caller << ",\"container_local_id\":" << localId;
         chunk(line, base, "context", renderContext, 18000);
@@ -1886,7 +1886,17 @@ PPC_FUNC(sub_8279DDC0) {
     __imp__sub_8279DDC0(ctx, base);
     DarkRecomp::Native::previewObserveVideo(base, container, localId);
     static std::atomic<uint64_t> calls{0};
-    if (enabled) captureVideo(++calls, base, container, localId, request, caller);
+    if (enabled) captureVideo(0x8279DDC0, ++calls, base, container, localId, request, caller);
+}
+
+extern "C" PPC_FUNC(__imp__sub_827A1990);
+PPC_FUNC(sub_827A1990) {
+    DarkRecomp::Native::StallProfiler::Scope stallCall(DarkRecomp::Native::StallProfiler::Section::Guest, "sub_827A1990", 0x827A1990, uint32_t(ctx.lr));
+    const uint32_t container = ctx.r3.u32, localId = ctx.r4.u32, request = ctx.r5.u32, caller = uint32_t(ctx.lr);
+    __imp__sub_827A1990(ctx, base);
+    DarkRecomp::Native::previewObserveVideo(base, container, localId);
+    static std::atomic<uint64_t> calls{0};
+    if (enabled) captureVideo(0x827A1990, ++calls, base, container, localId, request, caller);
 }
 
 PPC_FUNC(sub_82793C48) {

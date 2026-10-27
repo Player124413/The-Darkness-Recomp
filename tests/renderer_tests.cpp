@@ -193,6 +193,14 @@ int main(int argc,char** argv) {
         const auto tall = DarkRecomp::fitDisplay(2560, 720, 1280, 720);
         require(tall.x == 0 && tall.y == 180 && tall.width == 1280 && tall.height == 360,
                 "32:9 content cropped on narrower output");
+        const auto automatic = DarkRecomp::presentationRect(640, 480, 1920, 1080);
+        require(automatic.x == 240 && automatic.y == 0 && automatic.width == 1440 && automatic.height == 1080,
+                "automatic presentation stopped preserving the source aspect");
+        const auto stretched = DarkRecomp::presentationRect(640, 480, 1920, 1080, true);
+        require(stretched.x == 0 && stretched.y == 0 && stretched.width == 1920 && stretched.height == 1080,
+                "4:3 stretch did not fill the physical output");
+        require(DarkRecomp::presentationRect(640, 480, 0, 1080, true).width == 0,
+                "stretch presentation accepted a zero-sized target");
         Display display;
         uint32_t untouched = 0x12345678;
         require(!display.IsInitialized(), "New display reported ready");

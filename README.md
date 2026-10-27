@@ -235,6 +235,9 @@ guide, **F2** toggle capture, **Esc** release).
 - [CONTROLS.md](CONTROLS.md) — every binding, launcher option, and setting
 - [RENDERING.md](RENDERING.md) — how the renderer and frame pacing work
 - [STEAM_DECK.md](STEAM_DECK.md) — Proton setup, validation scope and diagnostics
+- [XWC audio tool](tools/xwc_audio/README.md) — read-only bank inspection, original XMA export and header timing diagnostics
+- [DDS texture tool](tools/texture_mods/README.md) — RGBA8 DDS helper and experimental world texture packs; one 2x wall replacement verified in-game
+- [Video pack tool](tools/video_mods/README.md) — imports timed WMV3/Theora replacements for the optional read-only video loader; playback qualification is in progress
 
 ## Updating a downloaded release
 

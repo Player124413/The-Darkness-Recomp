@@ -296,7 +296,14 @@ To reuse an already compiled Linux x86_64 musl wizard, add
 `--installer-binary /abs/darkrecomp-deck-installer`; Cargo is then unnecessary
 for packaging. The output directory receives
 `The-Darkness-Recomp-vX.Y.Z-steam-deck-x86_64.AppImage` and its `.sha256` file.
-Existing output files are preserved. No AppImage is published by this command.
+Each completed file is published atomically without replacement; the pair is
+not a cross-file transaction. The output filesystem must support hard links,
+and packaging fails cleanly when it does not. The image is published before
+the checksum, so interruption between those steps can leave a complete image
+without its checksum. A rerun reuses an existing ordinary output only when its
+bytes exactly match the newly staged file, then publishes the missing partner.
+Conflicting files and symlinks are preserved and cause packaging to fail.
+No AppImage is published by this command.
 
 The bundle retains the Rust wizard's source project, license and build
 instructions in `usr/share/darkrecomp/installer-source`, alongside provenance

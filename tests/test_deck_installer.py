@@ -239,6 +239,29 @@ class DeckInstallerProcessTests(unittest.TestCase):
         self.assertFalse(self.install.exists(), "installer must not create the install folder")
         self.assertEqual(self.parent_snapshot(), snapshot)
 
+    def test_nonexecutable_python_shadow_uses_later_executable(self):
+        shadow = self.fakebin / "python3"
+        shadow.write_text("inert nonexecutable fixture", encoding="utf-8")
+        shadow.chmod(0o644)
+        result = self.run_installer("--source", self.source, "--game-dir", self.game,
+                                    "--install-dir", self.install, "--yes")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.setup_capture.exists())
+        self.assertFalse(self.dialog_records.exists())
+
+    def test_nonexecutable_kdialog_shadow_uses_zenity(self):
+        shadow = self.fakebin / "kdialog"
+        shadow.write_text("inert nonexecutable fixture", encoding="utf-8")
+        shadow.chmod(0o644)
+        self.install_dialog("zenity")
+        self.configure_responses(*self.successful_wizard_responses())
+        result = self.run_installer("--source", self.source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.setup_capture.exists())
+        calls = self.dialog_calls()
+        self.assertTrue(calls)
+        self.assertTrue(all(call["name"] == "zenity" for call in calls))
+
     def test_game_picker_cancellation_has_no_install_side_effects(self):
         self.install_dialog("kdialog")
         self.configure_responses({"code": 1})

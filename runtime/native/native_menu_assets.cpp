@@ -1,4 +1,5 @@
 #include "native_menu_assets.h"
+#include "user_data_paths.h"
 #include <windows.h>
 #include <bcrypt.h>
 #include <algorithm>
@@ -183,8 +184,10 @@ void store(const std::filesystem::path& path, const Bytes& bytes) {
 
 NativeMenuAssets prepareNativeMenuAssets(const std::filesystem::path& gameDirectory,
                                         const std::filesystem::path& bundledAssetsDirectory,
-                                        bool russianMenu) noexcept {
+                                        bool russianMenu,
+                                        const std::filesystem::path& cacheDirectory) noexcept {
     try {
+        const auto cacheRoot = userDataCacheDirectory(gameDirectory, cacheDirectory, L"build_native/run/native-menu");
         const auto menuPath = bundledAssetsDirectory / (russianMenu ? L"CubeWnd.pc.ru.xcr" : L"CubeWnd.pc.xcr");
         const auto archivePath = bundledAssetsDirectory / L"GameContext_Create.pc.xdf";
         const auto [menuHash, archiveHash] = sourceHashes(bundledAssetsDirectory / L"CubeWnd.pc.xcr.source.sha256");
@@ -200,8 +203,9 @@ NativeMenuAssets prepareNativeMenuAssets(const std::filesystem::path& gameDirect
             return {menuPath, archivePath};
         }
         uncachedMenu(sourceArchive, sourceMenu.size());
-        const auto privateArchive = gameDirectory.parent_path() / L"build_native/run/native-menu" /
+        const auto privateArchive = cacheRoot /
             hash(sourceArchive) / L"GameContext_Create.pc.xdf";
+        if (!cacheDirectory.empty()) requireOrdinaryUserDataPath(privateArchive, UserDataPathKind::File);
         store(privateArchive, sourceArchive);
         std::fputs("[Menu] Preserving this dump's startup assets; PC menu reads use the loose override.\n", stderr);
         return {menuPath, privateArchive};

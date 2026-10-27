@@ -9,6 +9,7 @@ struct PPCContext;
 namespace DarkRecomp::Native {
 struct MenuPointerDisplay {
     uint32_t imageWidth = 0, imageHeight = 0, outputWidth = 0, outputHeight = 0;
+    bool stretchToFill = false;
 };
 struct MenuPointerPosition { int32_t x = 0, y = 0; };
 // Original face/model/projection product restricted to the logical UI plane:
@@ -86,13 +87,13 @@ inline std::optional<MenuPointerProjection> projectMenuPointerPlane(const MenuPo
         {0, -2 * spanY / (480 * plane.frameHeight), 1 - 2 * y / plane.frameHeight}, {0, 0, 1}};
 }
 
-// Presentation uses the renderer's own aspect fit. Black bars are outside the
-// interface; the original window tree supplies its logical coordinate extent.
+// Presentation uses the renderer's rectangle. Black bars are outside the
+// interface in Auto mode; stretch mode maps the complete output to the same UI.
 inline std::optional<MenuPointerPosition> mapMenuPointer(MenuPointerDisplay display,
     int32_t x, int32_t y, int32_t logicalWidth, int32_t logicalHeight) noexcept {
     if (logicalWidth <= 0 || logicalHeight <= 0) return {};
-    const auto fit = fitDisplay(display.imageWidth, display.imageHeight,
-                               display.outputWidth, display.outputHeight);
+    const auto fit = presentationRect(display.imageWidth, display.imageHeight,
+                                      display.outputWidth, display.outputHeight, display.stretchToFill);
     if (fit.width <= 0 || fit.height <= 0 || x < fit.x || y < fit.y ||
         x >= fit.x + fit.width || y >= fit.y + fit.height) return {};
     return MenuPointerPosition{
@@ -106,8 +107,8 @@ inline std::optional<MenuPointerPosition> mapMenuPointer(MenuPointerDisplay disp
     int32_t x, int32_t y, int32_t logicalWidth, int32_t logicalHeight,
     const MenuPointerProjection& projection) noexcept {
     if (logicalWidth <= 0 || logicalHeight <= 0) return {};
-    const auto fit = fitDisplay(display.imageWidth, display.imageHeight,
-                               display.outputWidth, display.outputHeight);
+    const auto fit = presentationRect(display.imageWidth, display.imageHeight,
+                                      display.outputWidth, display.outputHeight, display.stretchToFill);
     if (fit.width <= 0 || fit.height <= 0 || x < fit.x || y < fit.y ||
         x >= fit.x + fit.width || y >= fit.y + fit.height) return {};
     for (const auto* row : {&projection.x, &projection.y, &projection.w})
@@ -153,7 +154,8 @@ private:
 
 void initializeMenuPointer() noexcept;
 void setMenuPointerDisplay(uint32_t imageWidth, uint32_t imageHeight,
-                           uint32_t outputWidth, uint32_t outputHeight) noexcept;
+                           uint32_t outputWidth, uint32_t outputHeight,
+                           bool stretchToFill = false) noexcept;
 bool guestMenuPointerActive() noexcept;
 // Retail application ownership: +60 is CWorldData, +3672 is CubeFrontEnd;
 // FrontEnd initialization stores the owning application at +24.

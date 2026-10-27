@@ -16,6 +16,14 @@ restgprlr_14_address = 0x82899A40
 savefpr_14_address = 0x8289A190
 restfpr_14_address = 0x8289A1DC
 
+# Optional DARK_XMA_ORIGIN_PROBE=1 diagnostic: copy original source-opener
+# registers within the retained streamed-load scope. No guest reads or writes
+# at this hook; the original sliced-source constructor still executes.
+[[midasm_hook]]
+name = "ObserveXmaSourceSliceMidAsmHook"
+address = 0x827BD27C
+registers = ["r29", "r28", "r3", "r27", "r31", "r5", "r6", "r16"]
+
 # Evaluate the original god-mode predicates for the selected server player.
 # Only the loaded register changes; actor flags and checkpoints remain intact.
 [[midasm_hook]]

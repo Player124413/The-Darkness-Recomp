@@ -105,7 +105,7 @@ struct Fixture {
             std::filesystem::remove(bundle / name, error);
         std::filesystem::remove(game / L"Content/Gui/CubeWnd.xcr", error);
         std::filesystem::remove(game / L"Content/Xdf/GameContext_Create.XDF", error);
-        for (const auto& path : {root / L"build_native/run/native-menu", root / L"build_native/run",
+        for (const auto& path : {bundle / L"user-cache", root / L"build_native/run/native-menu", root / L"build_native/run",
              root / L"build_native", game / L"Content/Gui", game / L"Content/Xdf", game / L"Content", game, bundle, root})
             std::filesystem::remove(path, error);
     }
@@ -147,6 +147,20 @@ int main() {
         check(privateArchive == expected, "localized strings/fonts, file metadata, read links or compressed payload changed");
         check(read(archivePath) == localized.data && read(menuPath) == sourceMenu,
               "private menu preparation changed the user's original assets");
+        const auto isolatedCache = fixture.bundle / L"user-cache";
+        const auto isolated = prepareNativeMenuAssets(fixture.game, fixture.bundle, false, isolatedCache);
+        fixture.retain(isolated);
+        check(isolated.menu == prepared.menu && isolated.archive.parent_path().parent_path() == isolatedCache &&
+              read(isolated.archive) == privateArchive,
+              "explicit menu cache directory did not isolate the generated archive");
+        check(read(archivePath) == localized.data && read(menuPath) == sourceMenu && read(prepared.archive) == privateArchive,
+              "explicit menu cache changed source or legacy cache bytes");
+        const auto blockedCache = fixture.bundle / L"blocked-cache";
+        save(blockedCache, bytes("CACHE BLOCKER"));
+        const auto blocked = prepareNativeMenuAssets(fixture.game, fixture.bundle, false, blockedCache);
+        check(blocked.menu.empty() && blocked.archive.empty() && read(blockedCache) == bytes("CACHE BLOCKER"),
+              "invalid explicit menu cache used a shared fallback or overwrote the blocker");
+        std::filesystem::remove(blockedCache);
         check(prepareNativeMenuAssets(fixture.game, fixture.bundle).archive == prepared.archive,
               "identical localized cache was not reused");
         auto damagedPrivate = privateArchive; damagedPrivate.back() ^= 1;

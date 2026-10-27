@@ -155,9 +155,9 @@ class Registry:
         return data
 
 
-SETTINGS = ("brightness", "fov", "bloom", "vsync", "fps", "resolution", "mode", "motionblur", "antialiasing", "language", "anisotropy")
-SETTING_NAMES = ("BRIGHTNESS", "FIELD OF VIEW", "BLOOM", "VERTICAL SYNC", "FRAME LIMIT", "RESOLUTION", "DISPLAY", "MOTION BLUR", "ANTIALIASING", "LANGUAGE", "TEXTURE FILTERING")
-INITIAL_VALUES = ("100%", "ORIGINAL", "ON", "OFF", "60", "720P", "BORDERLESS", "OFF", "OFF", "SYSTEM", "16X")
+SETTINGS = ("brightness", "fov", "bloom", "vsync", "fps", "resolution", "mode", "motionblur", "antialiasing", "language", "anisotropy", "aspect")
+SETTING_NAMES = ("BRIGHTNESS", "FIELD OF VIEW", "BLOOM", "VERTICAL SYNC", "FRAME LIMIT", "RESOLUTION", "DISPLAY", "MOTION BLUR", "ANTIALIASING", "LANGUAGE", "TEXTURE FILTERING", "DISPLAY ASPECT")
+INITIAL_VALUES = ("100%", "ORIGINAL", "ON", "OFF", "60", "720P", "BORDERLESS", "OFF", "OFF", "SYSTEM", "16X", "AUTO")
 # Match KeyboardAction's order. Compact labels fit the original small-font
 # action column; binding values retain fixed widths for native hit rectangles.
 KEYBOARD_ACTIONS = ("MOVE FORWARD", "MOVE BACKWARD", "MOVE LEFT", "MOVE RIGHT", "LOOK UP", "LOOK DOWN",
@@ -239,7 +239,7 @@ def replace_video_page(registry, translations=None):
         # Preserve the original control's property order and native sizing.
         children.append(r.make("RGN", region))
         return r.make("WINDOW", "", children)
-    # The eleven native rows and original calibration controls fit above the
+    # The native rows and original calibration controls fit above the
     # footer by starting the heading one cell earlier on the existing grid.
     properties.append(window("CubeText", "nc, §LMENU_VIDEO_HEADING", "0,1,20,2"))
     for row, (key, name, initial) in enumerate(zip(SETTINGS, SETTING_NAMES, INITIAL_VALUES)):
@@ -259,7 +259,7 @@ def replace_video_page(registry, translations=None):
             properties.extend(relocated(n, "1,6,18,1", hidden_focus=p["CLASSNAME"] == "CubeOptionButton",
                                         group="colorprofile")
                               for n, p in original_controls if p.get("GROUP") == "cableprofile")
-    properties.append(window("CubeText", "sc, RESOLUTION/LANGUAGE: RESTART TO APPLY", "0,18,20,1"))
+    properties.append(window("CubeText", "sc, RES/ASPECT/LANG: RESTART TO APPLY", "0,18,20,1"))
     properties.append(window("CubeText", "sc, LEFT/RIGHT: CHANGE; CONFIRM: NEXT", "0,19,20,1"))
     r.set_children(page, properties)
 

@@ -18,6 +18,8 @@ struct KernelObject {
     bool unbuffered = false;
     uint32_t fileOpenOptions = 0;
     std::shared_ptr<const DarkRecomp::Native::CachedWeaponFile> cachedWeaponFile;
+    std::shared_ptr<const DarkRecomp::Native::VideoModFile> videoModFile;
+    std::shared_ptr<const DarkRecomp::Native::VideoModReadLease> videoModReadLease;
     bool notificationListener = false;
     uint64_t notificationAreas = 0;
     uint32_t notificationMaxVersion = 0;

@@ -123,7 +123,7 @@ bool makeColorCacheRoom(size_t bytes) {
     return true;
 }
 struct CachedVideo {
-    uint32_t owner = 0, frame = 0;
+    uint32_t owner = 0, frame = 0, ownerType = 0;
     std::array<uint8_t, 8> timestamp{};
     std::shared_ptr<const VideoFrame> image;
 };
@@ -706,12 +706,18 @@ const char* decodeVideoFrame(uint8_t* base, uint32_t frame, VideoFrame& result) 
 void previewObserveVideo(uint8_t* base, uint32_t container, uint32_t localId) {
     if (!active || localId % 3 != 2) return;
     uint8_t header[64], array[28], video[136];
-    if (!copyRenderMemory(base, container, header, sizeof(header)) || u32(header) != 0x82097C50 ||
-        !copyRenderMemory(base, u32(header + 56), array, sizeof(array)) || localId / 3 >= u32(array + 4)) return;
+    if (!copyRenderMemory(base, container, header, sizeof(header))) return;
+    // Retail WMV and Theora containers select the same owned Y/VU frame
+    // layout. Keep their concrete owner types paired: a shared offset alone
+    // is insufficient to identify an unrelated or partially torn-down object.
+    const uint32_t ownerType = u32(header) == 0x82097C50 ? 0x82097CF8 :
+                               u32(header) == 0x82097D90 ? 0x82097E38 : 0;
+    if (!ownerType || !copyRenderMemory(base, u32(header + 56), array, sizeof(array)) ||
+        localId / 3 >= u32(array + 4)) return;
     const uint64_t entry = uint64_t(u32(array + 24)) + (localId / 3) * 4ull;
     uint32_t owner = 0;
     if (entry + 4 > 0x100000000ull || !readWord(base, uint32_t(entry), owner) ||
-        !copyRenderMemory(base, owner, video, sizeof(video)) || u32(video) != 0x82097CF8) return;
+        !copyRenderMemory(base, owner, video, sizeof(video)) || u32(video) != ownerType) return;
     const uint32_t frame = u32(video + 80), key = u32(video + 126);
     std::array<uint8_t, 8> timestamp;
     if (!frame || !u16(video + 126) || !u16(video + 128) ||
@@ -719,7 +725,7 @@ void previewObserveVideo(uint8_t* base, uint32_t container, uint32_t localId) {
     {
         std::lock_guard lock(queueMutex);
         if (auto it = videos.find(key); it != videos.end() && it->second.owner == owner &&
-            it->second.frame == frame && it->second.timestamp == timestamp) return;
+            it->second.frame == frame && it->second.ownerType == ownerType && it->second.timestamp == timestamp) return;
     }
     auto image = std::make_shared<VideoFrame>();
     if (decodeVideoFrame(base, frame, *image)) return;
@@ -727,7 +733,7 @@ void previewObserveVideo(uint8_t* base, uint32_t container, uint32_t localId) {
     // update on the engine thread. Only owned plane copies cross threads.
     std::lock_guard lock(queueMutex);
     if (!videos.contains(key) && videos.size() >= 4) videos.erase(videos.begin());
-    videos[key] = {owner, frame, timestamp, image};
+    videos[key] = {owner, frame, ownerType, timestamp, image};
     if (++videoImages == 1) std::printf("[EnginePreview] Copied original YUV video frame %ux%u, texture pair=%08X\n",
                                      image->width, image->height, key);
 }

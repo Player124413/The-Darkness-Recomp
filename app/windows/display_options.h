@@ -24,8 +24,35 @@ inline bool parseDisplayDimension(std::wstring_view text, uint32_t& result) {
 }
 // Keep the established render height unless explicitly requested otherwise.
 // The world expands horizontally on wider displays; pixel count stays bounded.
-inline NativeDisplaySize renderSizeForDisplay(NativeDisplaySize output, uint32_t requestedHeight = 720) {
+inline NativeDisplaySize renderSizeForDisplay(NativeDisplaySize output, uint32_t requestedHeight = 720,
+                                              DarkRecomp::Native::DisplayAspectMode aspectMode =
+                                                  DarkRecomp::Native::DisplayAspectMode::Auto) {
     if (!output.width || !output.height || !requestedHeight) return {};
+    if (aspectMode == DarkRecomp::Native::DisplayAspectMode::Stretch4x3) {
+        // The guest video-mode gate requires at least 320 pixels wide. A 4:3
+        // mode therefore needs a 240-pixel minimum height even when the saved
+        // render-height request is lower.
+        const uint64_t targetHeight = (std::max)(uint64_t(240),
+            uint64_t((std::min)(requestedHeight, DarkRecomp::Native::kMaximumRenderHeight)));
+        NativeDisplaySize selected{};
+        uint64_t selectedHeight = 0;
+        for (uint64_t scale = 1; scale <= 3; ++scale) {
+            // Exact 4:3 dimensions must also remain four-pixel aligned after
+            // nativeResolutionScale divides the host raster dimensions. Try
+            // each supported scale because rounding across a scale boundary
+            // can make the largest candidate for one scale belong to another.
+            const uint64_t alignment = 12 * scale;
+            const uint64_t limit = (std::min)(targetHeight, 720 * scale);
+            const uint64_t height = (std::max)(alignment, limit / alignment * alignment);
+            const uint64_t width = height * 4 / 3;
+            const auto actualScale = nativeResolutionScale({uint32_t(width), uint32_t(height)});
+            if (actualScale == scale && height > selectedHeight) {
+                selected = {uint32_t(width), uint32_t(height)};
+                selectedHeight = height;
+            }
+        }
+        return selected;
+    }
     // Keep host targets bounded; the guest sees these dimensions divided by
     // nativeResolutionScale. The original camera rounds its viewport to four
     // logical pixels, so keep both extents aligned before publishing the mode.

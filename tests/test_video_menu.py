@@ -160,8 +160,24 @@ class VideoMenu(unittest.TestCase):
             self.assertNotIn("darkrecomp.gamma", buttons)
             self.assertIn("darkrecomp.language", buttons)
             self.assertIn("darkrecomp.anisotropy", buttons)
+            self.assertIn("darkrecomp.aspect", buttons)
             self.assertNotIn("darkrecomp.subtitle_scale", buttons)
             self.assertEqual(buttons[:2], ["darkrecomp.brightness", "darkrecomp.fov"])
+
+    def test_aspect_mode_is_visible_and_restart_applied(self):
+        for registry, _ in registries(self.output):
+            page, = [n for n in registry.roots if registry.decode(n) == ("WINDOW", "options_video")]
+            controls = [dict(registry.decode(c) for c in window.children)
+                        for window in page.children if registry.decode(window)[0] == "WINDOW"]
+            label, = [c for c in controls if c.get("RGN") == "1,17,10,1"]
+            button, = [c for c in controls if c.get("SCRIPT_PRESSED") == "darkrecomp.aspect"]
+            self.assertEqual(button["RGN"], "11,17,8,1")
+            self.assertEqual(button["CLASSNAME"], "CubeButton")
+            self.assertTrue(button["TEXT"].startswith("sc, < "))
+            self.assertTrue(label["TEXT"].startswith("sc, "))
+            self.assertLessEqual(len(label["TEXT"]) - 4, 20)
+            self.assertIn("sc, RES/ASPECT/LANG: RESTART TO APPLY",
+                          [c.get("TEXT") for c in controls])
 
     def test_exit_confirmation_and_keyboard_entry_preserve_original_controls(self):
         for (before, _), (after, _) in zip(registries(self.source), registries(self.output)):
@@ -439,7 +455,7 @@ class VideoMenu(unittest.TestCase):
             self.assertEqual(button["TEXT"], "sc, <    SYSTEM    >")
             self.assertEqual(button["CLASSNAME"], "CubeButton")
             self.assertEqual(button["ALWAYSPAINT"], "1")
-            self.assertIn("sc, RESOLUTION/LANGUAGE: RESTART TO APPLY", [c.get("TEXT") for c in controls])
+            self.assertIn("sc, RES/ASPECT/LANG: RESTART TO APPLY", [c.get("TEXT") for c in controls])
 
     def test_subtitle_size_is_visible_and_keeps_the_original_value_button_width(self):
         for registry, _ in registries(self.output):

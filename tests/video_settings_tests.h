@@ -97,6 +97,11 @@ static void testVideoSettings(PPCContext& ctx) {
                               "graphics packing boundary corrupted antialiasing, brightness, filtering or subtitle size");
                     }
         }
+    for (const auto aspect : {DisplayAspectMode::Auto, DisplayAspectMode::Stretch4x3}) {
+        auto selected = graphicsSettings(); selected.aspectMode = aspect;
+        check(setGraphicsSettings(selected) && graphicsSettings() == selected,
+              "graphics settings packing corrupted display aspect");
+    }
     for (const auto [mode, samples] : {std::pair{AntialiasingMode::Off, 1u}, {AntialiasingMode::FXAA, 1u},
                                       {AntialiasingMode::SMAA, 1u}, {AntialiasingMode::MSAA2x, 2u},
                                       {AntialiasingMode::MSAA4x, 4u}, {AntialiasingMode::MSAA8x, 8u}})
@@ -118,6 +123,10 @@ static void testVideoSettings(PPCContext& ctx) {
         const auto saved = graphicsSettings();
         check(!setGraphicsSettings(invalid) && graphicsSettings() == saved, "invalid antialiasing mode changed settings");
     }
+    invalid = graphicsSettings(); invalid.aspectMode = DisplayAspectMode(2);
+    { const auto saved = graphicsSettings();
+      check(!setGraphicsSettings(invalid) && graphicsSettings() == saved,
+            "invalid display aspect changed settings"); }
     setGraphicsSettings({});
 
     const uint32_t block = memory->allocate(0x10000);
@@ -450,10 +459,22 @@ static void testVideoSettings(PPCContext& ctx) {
           "invalid language direction changed settings");
     check(!changeVideoSetting("cg_prevmenu()", 1) && graphicsSettings() == before,
           "non-PC script was consumed by native settings");
-    for (const auto action : {"darkrecomp.vsync", "darkrecomp.mode", "darkrecomp.fps", "darkrecomp.resolution"}) {
+    for (const auto action : {"darkrecomp.vsync", "darkrecomp.mode", "darkrecomp.fps", "darkrecomp.resolution", "darkrecomp.aspect"}) {
         check(changeVideoSetting(action, 1) && validGraphicsSettings(graphicsSettings()), "native option change failed");
         check(!videoSettingLabel(action).empty(), "native option has no label");
     }
+    while (takeDisplaySettingsSaveRequest()) {}
+    auto aspectSelection = graphicsSettings(); aspectSelection.aspectMode = DisplayAspectMode::Auto;
+    check(setGraphicsSettings(aspectSelection) && changeVideoSetting("darkrecomp.aspect", 1) &&
+          graphicsSettings().aspectMode == DisplayAspectMode::Stretch4x3 && takeDisplaySettingsSaveRequest() &&
+          videoSettingLabel("darkrecomp.aspect").find("4:3 STRETCH") != std::string::npos,
+          "aspect menu did not select, label and persist 4:3 stretch");
+    check(changeVideoSetting("darkrecomp.aspect", 1) && graphicsSettings().aspectMode == DisplayAspectMode::Auto &&
+          takeDisplaySettingsSaveRequest() && videoSettingLabel("darkrecomp.aspect").find("AUTO") != std::string::npos,
+          "aspect menu did not wrap back to Auto");
+    const auto beforeBadAspectDirection = graphicsSettings();
+    check(!changeVideoSetting("darkrecomp.aspect", 0) && graphicsSettings() == beforeBadAspectDirection,
+          "invalid aspect direction changed settings");
     auto resolutionSelection = graphicsSettings(); resolutionSelection.renderHeight = 360;
     setGraphicsSettings(resolutionSelection);
     for (const auto height : {480u,720u,1080u,1440u,2160u,360u}) {
@@ -477,7 +498,7 @@ static void testVideoSettings(PPCContext& ctx) {
     // The engine gives small text two glyphs per cell. Dynamic values must
     // fit the authored eight-cell column without a font change or word wrap.
     for (const auto action : {"darkrecomp.fov", "darkrecomp.bloom", "darkrecomp.vsync",
-                              "darkrecomp.fps", "darkrecomp.resolution", "darkrecomp.mode", "darkrecomp.motionblur", "darkrecomp.antialiasing", "darkrecomp.brightness", "darkrecomp.language", "darkrecomp.subtitle_scale"}) {
+                              "darkrecomp.fps", "darkrecomp.resolution", "darkrecomp.mode", "darkrecomp.aspect", "darkrecomp.motionblur", "darkrecomp.antialiasing", "darkrecomp.brightness", "darkrecomp.language", "darkrecomp.subtitle_scale"}) {
         for (int i = 0; i < 128; ++i) {
             for (bool saved : {true, false}) {
                 reportDisplaySettingsSave(saved);
@@ -520,7 +541,8 @@ static void testVideoSettings(PPCContext& ctx) {
     }
     initializeNativeMenuText(true, 1);
     check(videoSettingLabel("darkrecomp.fov").size() == 20 &&
-          videoSettingLabel("darkrecomp.mode").size() == 20,
+          videoSettingLabel("darkrecomp.mode").size() == 20 &&
+          videoSettingLabel("darkrecomp.aspect").size() == 20,
           "Russian values changed the original button hit width");
     reportDisplaySettingsSave(false);
     check(videoSettingLabel("darkrecomp.bloom").find("\xce\xd8\xc8\xc1\xca\xc0") != std::string::npos,

@@ -239,8 +239,101 @@ def prepare_appdir(archive: Path, installer: Path, appdir: Path, root: Path = RO
     (appdir / 'AppRun').chmod(0o755)
     for name in ('darkrecomp-installer.desktop', 'darkrecomp-installer.svg'):
         shutil.copyfile(resources / name, appdir / name)
-    shutil.copyfile(resources / 'darkrecomp-installer.svg', appdir / '.DirIcon')
+    # AppDir thumbnailers require a raster PNG for .DirIcon.
+    shutil.copyfile(resources / 'darkrecomp-installer.png', appdir / '.DirIcon')
     return manifest
+
+
+def _is_executable_by_current_user(path: Path, *, posix: bool | None = None) -> bool:
+    """Check whether the package user can launch an existing POSIX AppImage."""
+    if posix is None:
+        posix = os.name == 'posix'
+    return not posix or os.access(path, os.X_OK)
+
+
+def existing_output_matches(staged: Path, destination: Path,
+                            *, require_executable: bool = False) -> bool | None:
+    """Return whether an existing ordinary file exactly matches staged.
+
+    None means the destination disappeared or changed identity during the read.
+    Symlinks and non-regular paths are rejected instead of being followed.
+    For the AppImage, optionally require execute access for the package user.
+    """
+    try:
+        before = destination.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(before.st_mode):
+        raise PackageError(f'Refusing non-regular existing output: {destination}')
+    if before.st_size != staged.stat().st_size:
+        return False
+
+    try:
+        with staged.open('rb') as expected, destination.open('rb') as actual:
+            opened = os.fstat(actual.fileno())
+            if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(before, opened):
+                return None
+            while True:
+                expected_chunk = expected.read(1024 * 1024)
+                actual_chunk = actual.read(1024 * 1024)
+                if expected_chunk != actual_chunk:
+                    return False
+                if not expected_chunk:
+                    break
+            after_read = os.fstat(actual.fileno())
+            if (after_read.st_size != opened.st_size
+                    or after_read.st_mtime_ns != opened.st_mtime_ns
+                    or after_read.st_ctime_ns != opened.st_ctime_ns):
+                return None
+            after_path = destination.lstat()
+            if not stat.S_ISREG(after_path.st_mode):
+                raise PackageError(f'Refusing non-regular existing output: {destination}')
+            if not os.path.samestat(after_read, after_path):
+                return None
+            if require_executable:
+                executable = _is_executable_by_current_user(destination)
+                try:
+                    after_access = destination.lstat()
+                except FileNotFoundError:
+                    return None
+                if not stat.S_ISREG(after_access.st_mode):
+                    raise PackageError(f'Refusing non-regular existing output: {destination}')
+                if (not os.path.samestat(after_read, after_access)
+                        or after_access.st_mode != after_path.st_mode
+                        or after_access.st_ctime_ns != after_path.st_ctime_ns):
+                    return None
+                if not executable:
+                    return False
+            return True
+    except FileNotFoundError:
+        return None
+
+
+def check_existing_output(staged: Path, destination: Path,
+                          *, require_executable: bool = False) -> None:
+    """Allow a missing destination or an exact regular match meeting its mode contract."""
+    if existing_output_matches(staged, destination,
+                               require_executable=require_executable) is False:
+        raise FileExistsError(f'Refusing to overwrite conflicting existing output: {destination}')
+
+
+def publish_no_replace(staged: Path, destination: Path,
+                       *, require_executable: bool = False) -> None:
+    """Publish without replacement, or reuse an exact match meeting its mode contract."""
+    for _ in range(2):
+        try:
+            os.link(staged, destination)
+            return
+        except FileExistsError:
+            if existing_output_matches(staged, destination,
+                                       require_executable=require_executable) is True:
+                return
+        except OSError as error:
+            raise PackageError(
+                f'Cannot publish {destination} with atomic no-overwrite hard-link '
+                f'semantics; verify hard-link support and output-directory access: {error}'
+            ) from error
+    raise FileExistsError(f'Output changed during publication; refusing to overwrite: {destination}')
 
 
 def package(archive: Path, output_dir: Path, appimagetool: Path, runtime_file: Path,
@@ -257,8 +350,6 @@ def package(archive: Path, output_dir: Path, appimagetool: Path, runtime_file: P
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / f'The-Darkness-Recomp-{version}-steam-deck-x86_64.AppImage'
     checksum = output.with_suffix('.AppImage.sha256')
-    if output.exists() or output.is_symlink() or checksum.exists() or checksum.is_symlink():
-        raise FileExistsError(f'Refusing to overwrite an existing release: {output}')
     installer = installer or build_installer(root)
     with tempfile.TemporaryDirectory(prefix='darkrecomp-appimage-') as temporary:
         stage = Path(temporary)
@@ -269,11 +360,26 @@ def package(archive: Path, output_dir: Path, appimagetool: Path, runtime_file: P
                         '--no-appstream', str(stage / 'AppDir'), str(generated)],
                        cwd=root, env=environment, check=True)
         validate_elf(generated, 'Generated AppImage')
-        with generated.open('rb') as source, output.open('xb') as target:
-            shutil.copyfileobj(source, target)
-        output.chmod(0o755)
-    with checksum.open('x', encoding='utf-8', newline='\n') as stream:
-        stream.write(f'{hash_file(output)}  {output.name}\n')
+        with tempfile.TemporaryDirectory(prefix='.darkrecomp-appimage-', dir=output_dir) as publication:
+            publication = Path(publication)
+            staged_output = publication / output.name
+            staged_checksum = publication / checksum.name
+            with generated.open('rb') as source, staged_output.open('xb') as target:
+                shutil.copyfileobj(source, target)
+            staged_output.chmod(0o755)
+            with staged_checksum.open('x', encoding='utf-8', newline='\n') as stream:
+                stream.write(f'{hash_file(staged_output)}  {output.name}\n')
+
+            # Refuse known conflicts before publishing either name. A crash
+            # between these two links can leave a complete image without its
+            # checksum; a later run may reuse only byte-identical regular files
+            # and requires the AppImage to remain executable on POSIX.
+            check_existing_output(staged_output, output, require_executable=True)
+            check_existing_output(staged_checksum, checksum)
+            # Each link is atomic and no-replace on its own; the pair is not a
+            # cross-file transaction. Publish the image before its checksum.
+            publish_no_replace(staged_output, output, require_executable=True)
+            publish_no_replace(staged_checksum, checksum)
     return output
 
 

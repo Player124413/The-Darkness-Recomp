@@ -35,10 +35,13 @@ SceneWorkPool::SceneWorkPool(unsigned count) noexcept {
     }
 }
 SceneWorkPool::~SceneWorkPool() {
+    stopForStartupCancellation();
+}
+void SceneWorkPool::stopForStartupCancellation() noexcept {
     std::lock_guard dispatch(dispatchMutex_);
     {std::lock_guard lock(mutex_);stop_=true;}
     ready_.notify_all();
-    for(auto& thread:workers_)thread.join();
+    for(auto& thread:workers_)if(thread.joinable())thread.join();
 }
 void SceneWorkPool::consume(Job& job,bool helper) noexcept {
     SceneDispatchScope scope;
