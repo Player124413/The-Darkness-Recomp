@@ -5,6 +5,64 @@ source includes a Linux launcher and file I/O compatibility fixes. Older release
 ZIPs might not contain these changes. Steam Deck gameplay, performance and
 suspend/resume have **not been verified**. There is no native Linux executable.
 
+## AppImage installer in Desktop Mode
+
+When a release includes `The-Darkness-Recomp-vX.Y.Z-steam-deck-x86_64.AppImage`,
+it provides a graphical installer for that released Windows build and Proton.
+It contains no original game files. You need your own complete extracted Xbox
+360 dump, Python 3.10 or newer and either KDialog or Zenity available on the
+system, plus an internet connection. Allow space for another copy of your game,
+the release, Proton downloads and extracted tools; Steam Runtime may download
+on first play. Choose writable Linux storage, such as the internal drive or
+an ext4-formatted SD card.
+
+1. Switch the Deck to **Desktop Mode** and download the AppImage from the
+   release's **Assets** list.
+2. In Dolphin, right-click it, open **Properties > Permissions**, enable
+   **Is executable**, and apply the change. Open the AppImage.
+3. Select the folder containing your own original `default.xex`, `Content` and
+   `System`, including the rest of your extracted dump. The installer copies
+   these files; it does not extract an Xbox disc image or download game data.
+4. Choose an existing parent folder outside your dump. For example, selecting
+   `/home/deck/Games` installs into `/home/deck/Games/The-Darkness-Recomp`.
+5. Review the destination and confirm installation. Setup verifies the UMU and
+   GE-Proton downloads, copies the release and your dump, then shows the launcher
+   and setup log paths. It does not start the game or install system packages.
+
+The installation remains in the selected folder after the AppImage closes.
+Open `Play-The-Darkness.desktop` there to play in Desktop Mode. Program files,
+your copied dump, saves and settings live in its `game` subfolder; the Proton
+prefix lives in `ge-prefix`. Keep the whole installation folder together.
+The installer AppImage can be moved or removed afterward.
+
+For Gaming Mode, add the installed game EXE through Steam's **Games > Add a
+Non-Steam Game > Browse**. With the example destination above, set:
+
+```text
+Target: "/home/deck/Games/The-Darkness-Recomp/game/build_native/Release/DarkRecomp.exe"
+Start In: "/home/deck/Games/The-Darkness-Recomp/game"
+Launch Options:
+```
+
+Under **Properties > Compatibility**, force an installed Proton tool. Select
+Steam Input's **Gamepad** template, then test in Desktop Mode before Gaming
+Mode. Steam uses the Proton tool selected in its shortcut; the desktop launcher
+uses the UMU and GE-Proton installed by the wizard. Steam Deck gameplay,
+performance, controls and suspend/resume still require actual hardware testing.
+
+To update, open a newer installer AppImage and select the same dump and the same
+parent folder. Setup updates managed program files while preserving existing
+saves, settings and the Proton prefix. Conflicting game assets or files you
+modified are preserved and reported as errors; consult the displayed setup log.
+
+If the AppImage reports a FUSE error, run its
+[extract-and-run fallback](https://docs.appimage.org/user-guide/troubleshooting/fuse.html)
+in Konsole, replacing the example version with the downloaded filename:
+
+```sh
+./The-Darkness-Recomp-vX.Y.Z-steam-deck-x86_64.AppImage --appimage-extract-and-run
+```
+
 ## Verified development setup
 
 On 2026-10-01, the Windows build was tested from a Windows PC in Ubuntu 24.04
@@ -210,3 +268,48 @@ The current build requires an x86-64 CPU with SSSE3. It does not select the
 build machine's CPU instruction set, and the bundled XMA decoder disables
 assembly optimizations. Graphics and audio still require Proton's Windows API
 implementations; those paths need actual Linux hardware validation.
+
+## Build the installer AppImage (maintainers)
+
+Run the packager on Linux with a complete Windows release ZIP built by
+`tools/package_release.py`. It validates the release manifest, file hashes and
+allowed contents before extracting the exact released payload. The AppImage
+also bundles this checkout's current setup engine. Supply locally verified
+`appimagetool` and an x86_64 type-2 AppImage runtime; packaging does not download
+these tools or game files.
+
+By default, packaging builds the Rust wizard with Cargo for
+`x86_64-unknown-linux-musl`. Install that Rust target and a suitable musl C linker
+in the build environment first:
+
+```sh
+rustup target add x86_64-unknown-linux-musl
+python3 tools/package_appimage.py \
+  --release-zip /abs/The-Darkness-Recomp-vX.Y.Z-windows-x64.zip \
+  --appimagetool /abs/appimagetool \
+  --runtime-file /abs/runtime-x86_64 \
+  --output-dir /abs/out
+```
+
+If needed, configure Cargo's `x86_64-unknown-linux-musl` linker for your toolchain.
+To reuse an already compiled Linux x86_64 musl wizard, add
+`--installer-binary /abs/darkrecomp-deck-installer`; Cargo is then unnecessary
+for packaging. The output directory receives
+`The-Darkness-Recomp-vX.Y.Z-steam-deck-x86_64.AppImage` and its `.sha256` file.
+Existing output files are preserved. No AppImage is published by this command.
+
+The bundle retains the Rust wizard's source project, license and build
+instructions in `usr/share/darkrecomp/installer-source`, alongside provenance
+hashes in `INSTALLER.json`. To check packaging and the installer without
+launching the game, build the wizard first, then run on Linux:
+
+```sh
+cargo test --manifest-path tools/deck_installer/Cargo.toml --locked
+python3 -m unittest discover -s tests -p test_appimage.py
+python3 -m unittest discover -s tests -p test_deck_installer.py
+python3 -m unittest discover -s tests -p test_linux_setup.py
+```
+
+The process tests use synthetic dumps and fake dialogs. They look for the
+default musl release binary; `DECK_INSTALLER_BINARY=/abs/path` can select a
+different compiled Linux binary. They skip when no executable is available.
